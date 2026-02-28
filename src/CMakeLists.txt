@@ -486,6 +486,7 @@ if(NOT BUILD_CLI_ONLY)
         wizard/LocaleCustomizationStep.qml
         wizard/UserCustomizationStep.qml
         wizard/WifiCustomizationStep.qml
+        wizard/ProvisioningCustomizationStep.qml
         wizard/RemoteAccessStep.qml
         wizard/SecureBootCustomizationStep.qml
         wizard/PiConnectCustomizationStep.qml

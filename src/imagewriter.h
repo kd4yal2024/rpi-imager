@@ -276,7 +276,7 @@ public:
     
     // Customisation API
     Q_INVOKABLE void applyCustomisationFromSettings(const QVariantMap &settings);  // Main entry: generates scripts from settings
-    Q_INVOKABLE void setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudinitNetwork, const ImageOptions::AdvancedOptions opts = {}, const QByteArray &initFormat = {});  // Advanced: bypass generator with pre-made scripts
+    Q_INVOKABLE void setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudinitNetwork, const QByteArray &cloudinitMetaData = {}, const ImageOptions::AdvancedOptions opts = {}, const QByteArray &initFormat = {});  // Advanced: bypass generator with pre-made scripts
     
     // Persistence API
     Q_INVOKABLE void setSavedCustomisationSettings(const QVariantMap &map);  // Legacy: prefer setPersistedCustomisationSetting()
@@ -300,6 +300,8 @@ public:
     
     /* Validate if a string is a valid repository URL (http/https ending with .json or .rpi-imager-manifest) */
     Q_INVOKABLE bool isValidRepoUrl(const QString &url) const;
+    /* Validate provisioning repository URL (GitHub owner/repo or /tree/branch path) */
+    Q_INVOKABLE bool isValidProvisioningRepoUrl(const QString &url) const;
     
     // Secure Boot CLI override
     static void setForceSecureBootEnabled(bool enabled);
@@ -435,7 +437,7 @@ private:
 protected:
     QUrl _src, _repo;
     QString _dst, _parentCategory, _osName, _osReleaseDate, _currentLang, _currentLangcode, _currentKeyboard;
-    QByteArray _expectedHash, _cmdline, _config, _firstrun, _cloudinit, _cloudinitNetwork, _initFormat;
+    QByteArray _expectedHash, _cmdline, _config, _firstrun, _cloudinit, _cloudinitNetwork, _cloudinitMetaData, _initFormat;
     ImageOptions::AdvancedOptions _advancedOptions;
     quint64 _downloadLen, _extrLen, _devLen, _dlnow, _verifynow;
     DriveListModel _drivelist;
@@ -451,6 +453,8 @@ protected:
     DownloadThread *_thread;
     bool _verifyEnabled, _multipleFilesInZip, _online, _extractSizeKnown;
     QSettings _settings;
+    bool _customisationInvalid = false;
+    QString _customisationInvalidReason;
     QMap<QString,QString> _translations;
     QTranslator *_trans;
     int _refreshIntervalOverrideMinutes;
@@ -488,6 +492,8 @@ protected:
     QString _sshKeyGen();
     void _applySystemdCustomisationFromSettings(const QVariantMap &s);
     void _applyCloudInitCustomisationFromSettings(const QVariantMap &s);
+    bool _fetchProvisioningCloudInit(const QVariantMap &s, QByteArray &userDataOut, QByteArray &metaDataOut, QString &errorOut);
+    void _setCustomisationInvalid(const QString &reason);
     void _continueStartWriteAfterCacheVerification(bool cacheIsValid);
     void scheduleOsListRefresh();
     void _handleMemoryAllocationFailure(const char* what);

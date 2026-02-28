@@ -209,6 +209,7 @@ WizardStepBase {
                     if (snapshot.localeConfigured) items.push(CommonStrings.localeConfigured)
                     if (snapshot.userConfigured) items.push(CommonStrings.userAccountConfigured)
                     if (snapshot.wifiConfigured) items.push(CommonStrings.wifiConfigured)
+                    if (snapshot.provisioningConfigured) items.push(qsTr("Provisioning"))
                     if (snapshot.sshEnabled) items.push(CommonStrings.sshEnabled)
                     if (snapshot.piConnectEnabled) items.push(CommonStrings.piConnectEnabled)
                     if (snapshot.featUsbGadgetEnabled) items.push(CommonStrings.usbGadgetEnabled)
@@ -243,6 +244,7 @@ WizardStepBase {
                         Text { text: "✓ " + CommonStrings.localeConfigured; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.localeConfigured }
                         Text { text: "✓ " + CommonStrings.userAccountConfigured; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.userConfigured }
                         Text { text: "✓ " + CommonStrings.wifiConfigured; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.wifiConfigured }
+                        Text { text: "✓ " + qsTr("Provisioning"); font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.provisioningConfigured }
                         Text { text: "✓ " + CommonStrings.sshEnabled; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.sshEnabled }
                         Text { text: "✓ " + CommonStrings.piConnectEnabled; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.piConnectEnabled }
                         Text { text: "✓ " + CommonStrings.usbGadgetEnabled; font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.featUsbGadgetEnabled }

@@ -119,12 +119,7 @@ ApplicationWindow {
             }
             
             onUpdatePopupRequested: function(updateUrl, version) {
-                if (!window.updatePopupShown) {
-                    window.updatePopupShown = true
-                    updatepopup.url = updateUrl
-                    updatepopup.version = version
-                    updatepopup.open()
-                }
+                console.log("Update popup suppressed:", updateUrl, version)
             }
         }
     }

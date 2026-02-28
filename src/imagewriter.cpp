@@ -65,6 +65,7 @@
 #include <QVersionNumber>
 #include <QCryptographicHash>
 #include <QRandomGenerator>
+#include <QEventLoop>
 #ifndef CLI_ONLY_BUILD
 #include <QDesktopServices>
 #include <QAccessible>
@@ -91,6 +92,169 @@ using namespace ImageOptions;
 
 namespace {
     constexpr uint MAX_SUBITEMS_DEPTH = 16;
+
+    QByteArray stripCloudConfigHeader(const QByteArray &data)
+    {
+        QByteArray trimmed = data.trimmed();
+        if (trimmed.startsWith("#cloud-config")) {
+            int idx = trimmed.indexOf('\n');
+            if (idx >= 0) {
+                trimmed = trimmed.mid(idx + 1);
+            } else {
+                trimmed.clear();
+            }
+        }
+        return trimmed;
+    }
+
+    QByteArray ensureCloudConfigHeader(const QByteArray &data)
+    {
+        QByteArray body = stripCloudConfigHeader(data);
+        if (body.isEmpty()) {
+            return QByteArray();
+        }
+        return QByteArray("#cloud-config\n") + body + QByteArray("\n");
+    }
+
+    QByteArray buildMultipartCloudConfig(const QByteArray &baseCloudConfig, const QByteArray &overlayCloudConfig)
+    {
+        const QByteArray basePart = ensureCloudConfigHeader(baseCloudConfig);
+        const QByteArray overlayPart = ensureCloudConfigHeader(overlayCloudConfig);
+
+        if (basePart.isEmpty()) {
+            return overlayPart;
+        }
+        if (overlayPart.isEmpty()) {
+            return basePart;
+        }
+
+        const QByteArray boundary = QByteArray("===============rpiimager_")
+            + QByteArray::number(QRandomGenerator::global()->generate64())
+            + QByteArray("==");
+
+        auto makePart = [&](const QByteArray &payload) {
+            QByteArray p;
+            p += "--" + boundary + "\n";
+            p += "Content-Type: text/cloud-config; charset=\"us-ascii\"\n";
+            p += "MIME-Version: 1.0\n\n";
+            p += payload;
+            if (!payload.endsWith('\n')) {
+                p += '\n';
+            }
+            return p;
+        };
+
+        QByteArray multipart;
+        multipart += "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\n";
+        multipart += "MIME-Version: 1.0\n\n";
+        multipart += makePart(basePart);
+        multipart += makePart(overlayPart);
+        multipart += "--" + boundary + "--\n";
+        return multipart;
+    }
+
+    bool fetchUrlSync(const QUrl &url, QByteArray &dataOut, QString &errorOut, int timeoutMs = 30000)
+    {
+        dataOut.clear();
+        errorOut.clear();
+
+        QEventLoop loop;
+        QTimer timer;
+        timer.setSingleShot(true);
+        timer.setInterval(timeoutMs);
+
+        CurlFetcher fetcher;
+        QObject::connect(&fetcher, &CurlFetcher::finished, &loop,
+            [&](const QByteArray &data, const QUrl &) {
+                dataOut = data;
+                loop.quit();
+            });
+        QObject::connect(&fetcher, &CurlFetcher::error, &loop,
+            [&](const QString &error, const QUrl &) {
+                errorOut = error;
+                loop.quit();
+            });
+        QObject::connect(&timer, &QTimer::timeout, &loop, [&]() {
+            errorOut = QStringLiteral("Timed out fetching %1").arg(url.toString());
+            loop.quit();
+        });
+
+        fetcher.fetch(url);
+        timer.start();
+        loop.exec();
+
+        return errorOut.isEmpty() && !dataOut.isEmpty();
+    }
+
+    bool parseProvisioningRepoUrl(const QString &repoUrl,
+                                  QString &ownerOut,
+                                  QString &repoOut,
+                                  QString &branchInOut,
+                                  QString &pathInOut,
+                                  QString &errorOut)
+    {
+        ownerOut.clear();
+        repoOut.clear();
+        errorOut.clear();
+
+        QUrl url(repoUrl.trimmed());
+        if (!url.isValid()) {
+            errorOut = QObject::tr("Invalid repository URL.");
+            return false;
+        }
+
+        if (url.host().compare(QStringLiteral("github.com"), Qt::CaseInsensitive) != 0) {
+            errorOut = QObject::tr("Only github.com repository URLs are supported.");
+            return false;
+        }
+
+        QStringList parts = url.path().split('/', Qt::SkipEmptyParts);
+        if (parts.size() < 2) {
+            errorOut = QObject::tr("Invalid GitHub repository URL.");
+            return false;
+        }
+
+        ownerOut = parts[0];
+        repoOut = parts[1];
+        if (repoOut.endsWith(".git", Qt::CaseInsensitive)) {
+            repoOut.chop(4);
+        }
+        if (ownerOut.isEmpty() || repoOut.isEmpty()) {
+            errorOut = QObject::tr("Invalid GitHub repository URL.");
+            return false;
+        }
+
+        QString branch = branchInOut.trimmed();
+        if (branch.isEmpty()) {
+            branch = QStringLiteral("main");
+        }
+
+        QString path = pathInOut.trimmed();
+        if (path.isEmpty()) {
+            path = QStringLiteral("provision/cloud-init");
+        }
+
+        if (parts.size() >= 4 && parts[2] == "tree") {
+            branch = parts[3];
+            if (pathInOut.trimmed().isEmpty() && parts.size() >= 5) {
+                path = parts.mid(4).join('/');
+            }
+        }
+
+        while (path.startsWith('/')) path.remove(0, 1);
+        while (path.endsWith('/')) path.chop(1);
+
+        if (path.isEmpty()) {
+            path = QStringLiteral("provision/cloud-init");
+        }
+        if (branch.isEmpty()) {
+            branch = QStringLiteral("main");
+        }
+
+        branchInOut = branch;
+        pathInOut = path;
+        return true;
+    }
 } // namespace anonymous
 
 // Initialize static member for secure boot CLI override
@@ -102,7 +266,7 @@ ImageWriter::ImageWriter(QObject *parent)
       _waitingForCacheVerification(false),
       _src(), _repo(QUrl(QString(OSLIST_URL))),
       _dst(), _parentCategory(), _osName(), _osReleaseDate(), _currentLang(), _currentLangcode(), _currentKeyboard(),
-      _expectedHash(), _cmdline(), _config(), _firstrun(), _cloudinit(), _cloudinitNetwork(), _initFormat(),
+      _expectedHash(), _cmdline(), _config(), _firstrun(), _cloudinit(), _cloudinitNetwork(), _cloudinitMetaData(), _initFormat(),
       _downloadLen(0), _extrLen(0), _devLen(0), _dlnow(0), _verifynow(0),
       _drivelist(DriveListModel(this)), // explicitly parented, so QML doesn't delete it
       _selectedDeviceValid(false),
@@ -561,6 +725,14 @@ QString ImageWriter::getHardwareName()
 /* Start writing */
 void ImageWriter::startWrite()
 {
+    if (_customisationInvalid) {
+        QString reason = _customisationInvalidReason.isEmpty()
+            ? tr("Customisation is invalid.")
+            : _customisationInvalidReason;
+        emit error(tr("Cannot start write. %1").arg(reason));
+        return;
+    }
+
     if (!readyToWrite())
     {
         // Provide a user-visible error rather than silently returning, so the UI can recover
@@ -1138,7 +1310,7 @@ void ImageWriter::startWrite()
     _thread->setVerifyEnabled(_verifyEnabled);
     _thread->setUserAgent(QString("Mozilla/5.0 rpi-imager/%1").arg(staticVersion()).toUtf8());
     qDebug() << "startWrite: Passing to thread - initFormat:" << _initFormat << "cloudinit empty:" << _cloudinit.isEmpty() << "cloudinitNetwork empty:" << _cloudinitNetwork.isEmpty();
-    _thread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _initFormat, _advancedOptions);
+    _thread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _cloudinitMetaData, _initFormat, _advancedOptions);
     
     // Pass debug options to the thread
     _thread->setDebugDirectIO(_debugDirectIO);
@@ -1387,6 +1559,11 @@ QString ImageWriter::constantVersion() const
 /* Returns true if version argument is newer than current program */
 bool ImageWriter::isVersionNewer(const QString &version)
 {
+    Q_UNUSED(version);
+    // This build intentionally disables update prompting.
+    return false;
+
+    /*
     // Strip 'v' prefix if present - QVersionNumber requires strings to start with a digit
     QString serverVersion = version.startsWith('v', Qt::CaseInsensitive) ? version.mid(1) : version;
     QString currentVersion = QString(IMAGER_VERSION_STR);
@@ -1395,6 +1572,7 @@ bool ImageWriter::isVersionNewer(const QString &version)
     }
     
     return QVersionNumber::fromString(serverVersion) > QVersionNumber::fromString(currentVersion);
+    */
 }
 
 void ImageWriter::setCustomOsListUrl(const QUrl &url)
@@ -2807,7 +2985,7 @@ bool ImageWriter::getBoolSetting(const QString &key)
     else if (key == "eject")
         return _settings.value(key, true).toBool();
     else if (key == "check_version")
-        return _settings.value(key, CHECK_VERSION_DEFAULT).toBool();
+        return false;
     else
         return _settings.value(key).toBool();
 }
@@ -2946,13 +3124,24 @@ bool ImageWriter::isSecureBootForcedByCliFlag() const
     return _forceSecureBootEnabled;
 }
 
-void ImageWriter::setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudinitNetwork, const ImageOptions::AdvancedOptions opts, const QByteArray &initFormat)
+void ImageWriter::setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudinitNetwork, const QByteArray &cloudinitMetaData, const ImageOptions::AdvancedOptions opts, const QByteArray &initFormat)
 {
     _config = config;
     _cmdline = cmdline;
     _firstrun = firstrun;
     _cloudinit = cloudinit;
+    {
+        QByteArray trimmedCloud = _cloudinit.trimmed();
+        const QByteArray multipartMarker("Content-Type: multipart/");
+        const int multipartPos = trimmedCloud.indexOf(multipartMarker);
+        if (multipartPos > 0) {
+            qDebug() << "Cloudinit normalization: stripping non-MIME prefix before multipart payload";
+            trimmedCloud = trimmedCloud.mid(multipartPos);
+            _cloudinit = trimmedCloud;
+        }
+    }
     _cloudinitNetwork = cloudinitNetwork;
+    _cloudinitMetaData = cloudinitMetaData;
     _advancedOptions = opts;
     
     // If initFormat is provided, use it; otherwise keep current value
@@ -2964,29 +3153,181 @@ void ImageWriter::setImageCustomisation(const QByteArray &config, const QByteArr
     qDebug() << "Custom config.txt entries:" << config;
     qDebug() << "Custom cmdline.txt entries:" << cmdline;
     qDebug() << "Custom firstrun.sh:" << firstrun;
+    const QByteArray trimmedCloud = cloudinit.trimmed();
+    if (!trimmedCloud.isEmpty()) {
+        const bool multipart = trimmedCloud.startsWith("Content-Type: multipart/");
+        qDebug() << "Cloudinit payload format:" << (multipart ? "multipart" : "cloud-config");
+    }
     qDebug() << "Cloudinit:" << cloudinit;
+    qDebug() << "Cloudinit meta-data:" << cloudinitMetaData;
     qDebug() << "Advanced options:" << opts;
     qDebug() << "initFormat parameter:" << initFormat << "-> _initFormat:" << _initFormat;
 }
 
 void ImageWriter::applyCustomisationFromSettings(const QVariantMap &settings)
 {
+    _customisationInvalid = false;
+    _customisationInvalidReason.clear();
+
+    // Merge runtime settings with persisted settings so provisioning does not
+    // accidentally drop base user/SSH/Wi-Fi/locale values.
+    QVariantMap effectiveSettings = getSavedCustomisationSettings();
+    for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
+        effectiveSettings.insert(it.key(), it.value());
+    }
+
     // Build customisation payloads from provided settings map
     // This method accepts settings directly (which may be a combination of
     // persistent and ephemeral/runtime settings from the wizard)
 
     // If the selected image does not support customisation, ensure nothing is staged
     if (_initFormat.isEmpty()) {
-        setImageCustomisation(QByteArray(), QByteArray(), QByteArray(), QByteArray(), QByteArray(), NoAdvancedOptions);
+        setImageCustomisation(QByteArray(), QByteArray(), QByteArray(), QByteArray(), QByteArray(), QByteArray(), NoAdvancedOptions);
+        return;
+    }
+
+    const bool provisioningEnabled = effectiveSettings.value("provisioningEnabled").toBool();
+    if (provisioningEnabled) {
+        if (!(_initFormat == "cloudinit" || _initFormat == "cloudinit-rpi")) {
+            _setCustomisationInvalid(tr("Provisioning requires an OS image that supports cloud-init. Falling back to standard customisation."));
+            _applyCloudInitCustomisationFromSettings(effectiveSettings);
+            return;
+        }
+
+        QByteArray repoUserData;
+        QByteArray repoMetaData;
+        QString fetchError;
+        if (!_fetchProvisioningCloudInit(effectiveSettings, repoUserData, repoMetaData, fetchError)) {
+            _setCustomisationInvalid(fetchError.isEmpty()
+                ? tr("Failed to fetch provisioning files from the repository. Falling back to standard customisation.")
+                : fetchError);
+            qWarning() << "Provisioning fetch failed; continuing with standard cloud-init customisation:" << _customisationInvalidReason;
+            _applyCloudInitCustomisationFromSettings(effectiveSettings);
+            return;
+        }
+
+        // Always keep standard wizard cloud-init settings (users/SSH/Wi-Fi/locale/etc)
+        // and layer repository provisioning cloud-init as an additional cloud-config part.
+        const bool sshEnabled = effectiveSettings.value("sshEnabled").toBool();
+        const bool hasCcRpi = imageSupportsCcRpi();
+        QByteArray baseCloud = rpi_imager::CustomisationGenerator::generateCloudInitUserData(
+            effectiveSettings, _piConnectToken, hasCcRpi, sshEnabled, getCurrentUser());
+        QByteArray netcfg = rpi_imager::CustomisationGenerator::generateCloudInitNetworkConfig(
+            effectiveSettings, hasCcRpi);
+        QByteArray mergedCloud = buildMultipartCloudConfig(baseCloud, repoUserData);
+        qDebug() << "Provisioning merge:"
+                 << "baseCloud bytes=" << baseCloud.size()
+                 << "repoCloud bytes=" << repoUserData.size()
+                 << "mergedCloud bytes=" << mergedCloud.size()
+                 << "networkCfg bytes=" << netcfg.size();
+
+        // Optional cmdline append for WiFi country
+        QByteArray cmdlineAppend;
+        const QString wifiCountry = effectiveSettings.value("recommendedWifiCountry").toString().trimmed();
+        if (!wifiCountry.isEmpty()) {
+            cmdlineAppend = QByteArray(" ") + QByteArray("cfg80211.ieee80211_regdom=") + wifiCountry.toUtf8();
+        }
+
+        // Preserve secure boot configuration if enabled
+        ImageOptions::AdvancedOptions advOpts = NoAdvancedOptions;
+        bool secureBootEnabled = effectiveSettings.value("secureBootEnabled").toBool();
+        QString rsaKeyPath = _settings.value("secureboot_rsa_key").toString();
+        if (secureBootEnabled && !rsaKeyPath.isEmpty()) {
+            advOpts |= ImageOptions::EnableSecureBoot;
+            qDebug() << "Secure boot enabled with RSA key:" << rsaKeyPath;
+        }
+
+        // Keep repository meta-data only if hostname was not explicitly configured in wizard
+        // to avoid overriding standard customisation.
+        QByteArray metaDataToUse;
+        if (!effectiveSettings.contains("hostname")) {
+            metaDataToUse = repoMetaData;
+        }
+
+        setImageCustomisation(QByteArray(), cmdlineAppend, QByteArray(), mergedCloud, netcfg, metaDataToUse, advOpts);
         return;
     }
 
     if (_initFormat == "systemd") {
-        _applySystemdCustomisationFromSettings(settings);
+        _applySystemdCustomisationFromSettings(effectiveSettings);
     } else {
         // customisation for cloudinit and cloudinit-rpi
-        _applyCloudInitCustomisationFromSettings(settings);
+        _applyCloudInitCustomisationFromSettings(effectiveSettings);
     }
+}
+
+void ImageWriter::_setCustomisationInvalid(const QString &reason)
+{
+    _customisationInvalid = true;
+    _customisationInvalidReason = reason;
+}
+
+bool ImageWriter::_fetchProvisioningCloudInit(const QVariantMap &s, QByteArray &userDataOut, QByteArray &metaDataOut, QString &errorOut)
+{
+    userDataOut.clear();
+    metaDataOut.clear();
+    errorOut.clear();
+
+    QString repoUrl = s.value("provisioningRepoUrl").toString().trimmed();
+    if (repoUrl.isEmpty()) {
+        errorOut = tr("Provisioning repo URL is required.");
+        return false;
+    }
+
+    QString branch = s.value("provisioningRepoBranch").toString().trimmed();
+    if (branch.isEmpty()) {
+        branch = "main";
+    }
+
+    QString path = s.value("provisioningPath").toString().trimmed();
+    if (path.isEmpty()) {
+        path = "provision/cloud-init";
+    }
+
+    QString owner;
+    QString repo;
+    if (!parseProvisioningRepoUrl(repoUrl, owner, repo, branch, path, errorOut)) {
+        return false;
+    }
+
+    QUrl userUrl(QString("https://raw.githubusercontent.com/%1/%2/%3/%4/%5")
+                 .arg(owner, repo, branch, path, "user-data.example.yaml"));
+    QUrl metaUrl(QString("https://raw.githubusercontent.com/%1/%2/%3/%4/%5")
+                 .arg(owner, repo, branch, path, "meta-data.example.yaml"));
+
+    QByteArray userDataRaw;
+    QString fetchError;
+    if (!fetchUrlSync(userUrl, userDataRaw, fetchError)) {
+        errorOut = tr("Failed to fetch user-data from %1").arg(userUrl.toString());
+        if (!fetchError.isEmpty()) {
+            errorOut += tr(" (%1)").arg(fetchError);
+        }
+        return false;
+    }
+
+    QByteArray metaDataRaw;
+    fetchError.clear();
+    if (!fetchUrlSync(metaUrl, metaDataRaw, fetchError)) {
+        errorOut = tr("Failed to fetch meta-data from %1").arg(metaUrl.toString());
+        if (!fetchError.isEmpty()) {
+            errorOut += tr(" (%1)").arg(fetchError);
+        }
+        return false;
+    }
+
+    userDataOut = stripCloudConfigHeader(userDataRaw);
+    if (userDataOut.isEmpty()) {
+        errorOut = tr("Fetched user-data is empty.");
+        return false;
+    }
+
+    metaDataOut = metaDataRaw.trimmed();
+    if (metaDataOut.isEmpty()) {
+        errorOut = tr("Fetched meta-data is empty.");
+        return false;
+    }
+
+    return true;
 }
 
 void ImageWriter::_applySystemdCustomisationFromSettings(const QVariantMap &s)
@@ -3012,7 +3353,7 @@ void ImageWriter::_applySystemdCustomisationFromSettings(const QVariantMap &s)
         qDebug() << "Secure boot enabled with RSA key:" << rsaKeyPath;
     }
 
-    setImageCustomisation(QByteArray(), cmdlineAppend, script, QByteArray(), QByteArray(), advOpts);
+    setImageCustomisation(QByteArray(), cmdlineAppend, script, QByteArray(), QByteArray(), QByteArray(), advOpts);
 }
 
 void ImageWriter::_applyCloudInitCustomisationFromSettings(const QVariantMap &s)
@@ -3045,7 +3386,7 @@ void ImageWriter::_applyCloudInitCustomisationFromSettings(const QVariantMap &s)
         qDebug() << "Secure boot enabled with RSA key:" << rsaKeyPath;
     }
     
-    setImageCustomisation(QByteArray(), cmdlineAppend, QByteArray(), cloud, netcfg, advOpts);
+    setImageCustomisation(QByteArray(), cmdlineAppend, QByteArray(), cloud, netcfg, QByteArray(), advOpts);
 }
 
 QString ImageWriter::crypt(const QByteArray &password)
@@ -3363,6 +3704,16 @@ bool ImageWriter::isValidRepoUrl(const QString &url) const
         QStringLiteral("^https?://[^ \\t\\r\\n]+\\.(json|" MANIFEST_EXTENSION ")$"), 
         QRegularExpression::CaseInsensitiveOption);
     return repoUrlRe.match(url).hasMatch();
+}
+
+bool ImageWriter::isValidProvisioningRepoUrl(const QString &url) const
+{
+    QString owner;
+    QString repo;
+    QString branch = QStringLiteral("main");
+    QString path = QStringLiteral("provision/cloud-init");
+    QString error;
+    return parseProvisioningRepoUrl(url, owner, repo, branch, path, error);
 }
 
 // Cache-related methods removed - now handled by CacheManager
@@ -3797,7 +4148,7 @@ void ImageWriter::_continueStartWriteAfterCacheVerification(bool cacheIsValid)
     _thread->setVerifyEnabled(_verifyEnabled);
     _thread->setUserAgent(QString("Mozilla/5.0 rpi-imager/%1").arg(staticVersion()).toUtf8());
     qDebug() << "_continueStartWrite: Passing to thread - initFormat:" << _initFormat << "cloudinit empty:" << _cloudinit.isEmpty() << "cloudinitNetwork empty:" << _cloudinitNetwork.isEmpty();
-    _thread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _initFormat, _advancedOptions);
+    _thread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _cloudinitMetaData, _initFormat, _advancedOptions);
     
     // Pass debug options to the thread
     _thread->setDebugDirectIO(_debugDirectIO);

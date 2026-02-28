@@ -866,11 +866,7 @@ WizardStepBase {
             var o = JSON.parse(root.imageWriter.getFilteredOSlist())
             if ("imager" in o) {
                 var imager = o["imager"]
-                if (root.imageWriter.getBoolSetting("check_version") && "latest_version" in imager && "url" in imager) {
-                    if (!root.imageWriter.isEmbeddedMode() && root.imageWriter.isVersionNewer(imager["latest_version"])) {
-                        root.updatePopupRequested(imager["url"], imager["latest_version"])
-                    }
-                }
+                // Startup update checks are intentionally disabled.
                 if ("default_os" in imager) {
                     selectNamedOS(imager["default_os"], root.osmodel)
                 }

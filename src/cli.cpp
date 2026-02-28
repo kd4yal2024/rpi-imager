@@ -258,7 +258,7 @@ int Cli::run()
             }
         }
 
-        _imageWriter->setImageCustomisation("", "", "", userData, networkConfig, advancedOptions, initFormat);
+        _imageWriter->setImageCustomisation("", "", "", userData, networkConfig, "", advancedOptions, initFormat);
     }
     else if (!parser.value("first-run-script").isEmpty())
     {
@@ -280,12 +280,12 @@ int Cli::run()
             return 1;
         }
 
-        _imageWriter->setImageCustomisation("", "", firstRunScript, "", "", ImageOptions::UserDefinedFirstRun | advancedOptions, initFormat);
+        _imageWriter->setImageCustomisation("", "", firstRunScript, "", "", "", ImageOptions::UserDefinedFirstRun | advancedOptions, initFormat);
     }
     else if (advancedOptions != ImageOptions::NoAdvancedOptions)
     {
         // Secure boot key provided without customization scripts
-        _imageWriter->setImageCustomisation("", "", "", "", "", advancedOptions, initFormat);
+        _imageWriter->setImageCustomisation("", "", "", "", "", "", advancedOptions, initFormat);
     }
 
     _imageWriter->setDst(args[1]);
