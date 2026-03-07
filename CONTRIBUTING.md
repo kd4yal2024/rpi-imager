@@ -37,7 +37,10 @@ This will build and install the version of Qt preferred for Raspberry Pi Imager 
 
 - Get the Qt online installer from: https://www.qt.io/download-open-source
   - During installation, choose Qt 6.9 with Mingw64 64-bit toolchain.
-- For building the installer, install Inno Setup scriptable install system: https://jrsoftware.org/isdl.php
+- For building the NSIS installer with `mingw32-make package`, install NSIS:
+  - `winget install --id NSIS.NSIS -e --accept-source-agreements --accept-package-agreements`
+- Optional: to build an MSI with CPack WiX, install WiX Toolset 3.x.
+- Optional: for building the Inno Setup installer target, install Inno Setup scriptable install system: https://jrsoftware.org/isdl.php
 - Install Visual Studio Code (or a derivative) and the Qt Extension Pack.
 - It is assumed you already have a valid code signing certificate, and the Windows 10 Kit (SDK) installed.
 
@@ -54,6 +57,21 @@ Building Raspberry Pi Imager on Windows is best done with Visual Studio Code (or
 - In the CMake plugin tab, ensure you have selected the `MinSizeRel` variant if you intend to distribute to others.
 - In the CMake plugin tab, select the 'inno_installer' target, and build it
 - Your resultant installer will be located in `%WORKSPACE%\build\installer`
+
+#### Packaging from command line
+
+- Build and package with NSIS:
+  ```powershell
+  $env:Path = "C:\Program Files (x86)\NSIS;C:\Qt\Tools\mingw1310_64\bin;$env:Path"
+  mingw32-make -j8
+  mingw32-make package
+  ```
+  - Output: `%WORKSPACE%\build\rpi-imager-<version>-win64.exe`
+- Build MSI with WiX/CPack:
+  ```powershell
+  cpack -G WIX --config %WORKSPACE%\build\CPackConfig.cmake -D CPACK_RESOURCE_FILE_LICENSE=%WORKSPACE%\build\license.rtf -D CPACK_MONOLITHIC_INSTALL=ON
+  ```
+  - Output: `%WORKSPACE%\build\rpi-imager-<version>-win64.msi`
 
 ### macOS
 
