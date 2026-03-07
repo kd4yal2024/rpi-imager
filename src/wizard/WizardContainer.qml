@@ -31,7 +31,7 @@ Item {
     // NOT a binding, so it won't auto-change when hasNetworkConnectivity changes.
     // The onOsListUnavailableChanged handler manages the offline→online transition.
     property int currentStep: 0
-    readonly property int totalSteps: 13
+    readonly property int totalSteps: 14
     
     // Track which steps have been made permissible/unlocked for navigation
     // Each bit represents a step: bit 0 = Device, bit 1 = OS, etc.
@@ -60,6 +60,7 @@ Item {
     property bool localeConfigured: false
     property bool userConfigured: false
     property bool wifiConfigured: false
+    property bool provisioningConfigured: false
     property bool sshEnabled: false
     property bool secureBootEnabled: false
     property bool piConnectEnabled: false
@@ -98,6 +99,7 @@ Item {
         localeConfigured: false,
         userConfigured: false,
         wifiConfigured: false,
+        provisioningConfigured: false,
         sshEnabled: false,
         piConnectEnabled: false,
         ifI2cEnabled: false,
@@ -117,12 +119,13 @@ Item {
     readonly property int stepLocaleCustomization: 4
     readonly property int stepUserCustomization: 5
     readonly property int stepWifiCustomization: 6
-    readonly property int stepRemoteAccess: 7
-    readonly property int stepSecureBootCustomization: 8
-    readonly property int stepPiConnectCustomization: 9
-    readonly property int stepIfAndFeatures: 10
-    readonly property int stepWriting: 11
-    readonly property int stepDone: 12
+    readonly property int stepProvisioningCustomization: 7
+    readonly property int stepRemoteAccess: 8
+    readonly property int stepSecureBootCustomization: 9
+    readonly property int stepPiConnectCustomization: 10
+    readonly property int stepIfAndFeatures: 11
+    readonly property int stepWriting: 12
+    readonly property int stepDone: 13
     
     signal wizardCompleted()
     signal updatePopupRequested(url updateUrl, string version)
@@ -250,7 +253,7 @@ Item {
             return []
         }
         
-        var labels = [qsTr("Hostname"), qsTr("Localisation"), qsTr("User"), qsTr("Wi‑Fi"), qsTr("Remote access")]
+        var labels = [qsTr("Hostname"), qsTr("Localisation"), qsTr("User"), qsTr("Wi‑Fi"), qsTr("Provisioning"), qsTr("Remote access")]
         if (secureBootAvailable) {
             labels.push(qsTr("Secure Boot"))
         }
@@ -274,6 +277,7 @@ Item {
         if (stepLabel === qsTr("Localisation")) return localeConfigured
         if (stepLabel === qsTr("User")) return userConfigured
         if (stepLabel === qsTr("Wi‑Fi")) return wifiConfigured
+        if (stepLabel === qsTr("Provisioning")) return provisioningConfigured
         if (stepLabel === qsTr("Remote access")) return sshEnabled
         if (stepLabel === qsTr("Secure Boot")) return secureBootEnabled
         if (stepLabel === qsTr("Raspberry Pi Connect")) return piConnectEnabled
@@ -313,6 +317,7 @@ Item {
         localeConfigured = false
         userConfigured = false
         wifiConfigured = false
+        provisioningConfigured = false
         sshEnabled = false
         secureBootEnabled = false
         piConnectEnabled = false
@@ -340,6 +345,7 @@ Item {
         localeConfigured = false
         userConfigured = false
         wifiConfigured = false
+        provisioningConfigured = false
         sshEnabled = false
         piConnectEnabled = false
         
@@ -546,6 +552,7 @@ Item {
                                         else if (root.currentStep === root.stepLocaleCustomization) currentStepLabel = qsTr("Localisation")
                                         else if (root.currentStep === root.stepUserCustomization) currentStepLabel = qsTr("User")
                                         else if (root.currentStep === root.stepWifiCustomization) currentStepLabel = qsTr("Wi‑Fi")
+                                        else if (root.currentStep === root.stepProvisioningCustomization) currentStepLabel = qsTr("Provisioning")
                                         else if (root.currentStep === root.stepRemoteAccess) currentStepLabel = qsTr("Remote access")
                                         else if (root.currentStep === root.stepPiConnectCustomization) currentStepLabel = qsTr("Raspberry Pi Connect")
                                         else if (root.currentStep === root.stepIfAndFeatures) currentStepLabel = qsTr("Interfaces & Features")
@@ -586,6 +593,7 @@ Item {
                                             else if (stepLabel === qsTr("Localisation")) target = root.stepLocaleCustomization
                                             else if (stepLabel === qsTr("User")) target = root.stepUserCustomization
                                             else if (stepLabel === qsTr("Wi‑Fi")) target = root.stepWifiCustomization
+                                            else if (stepLabel === qsTr("Provisioning")) target = root.stepProvisioningCustomization
                                             else if (stepLabel === qsTr("Remote access")) target = root.stepRemoteAccess
                                             else if (stepLabel === qsTr("Raspberry Pi Connect")) target = root.stepPiConnectCustomization
                                             else if (stepLabel === qsTr("Interfaces & Features")) target = root.stepIfAndFeatures
@@ -792,6 +800,7 @@ Item {
                     localeConfigured: localeConfigured,
                     userConfigured: userConfigured,
                     wifiConfigured: wifiConfigured,
+                    provisioningConfigured: provisioningConfigured,
                     sshEnabled: sshEnabled,
                     piConnectEnabled: piConnectEnabled,
                     ifI2cEnabled: ifI2cEnabled,
@@ -873,6 +882,7 @@ Item {
             case stepLocaleCustomization: return localeCustomizationStep
             case stepUserCustomization: return userCustomizationStep
             case stepWifiCustomization: return wifiCustomizationStep
+            case stepProvisioningCustomization: return provisioningCustomizationStep
             case stepRemoteAccess: return remoteAccessStep
             case stepSecureBootCustomization: return secureBootCustomizationStep
             case stepPiConnectCustomization: return piConnectCustomizationStep
@@ -982,6 +992,20 @@ Item {
     Component {
         id: wifiCustomizationStep
         WifiCustomizationStep {
+            imageWriter: root.imageWriter
+            wizardContainer: root
+            appOptionsButton: optionsButton
+            onNextClicked: root.nextStep()
+            onBackClicked: root.previousStep()
+            onSkipClicked: {
+                // Skip functionality is handled in the step itself
+            }
+        }
+    }
+
+    Component {
+        id: provisioningCustomizationStep
+        ProvisioningCustomizationStep {
             imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
@@ -1482,6 +1506,7 @@ Item {
         localeConfigured = false
         userConfigured = false
         wifiConfigured = false
+        provisioningConfigured = false
         sshEnabled = false
         piConnectEnabled = false
         piConnectAvailable = false
