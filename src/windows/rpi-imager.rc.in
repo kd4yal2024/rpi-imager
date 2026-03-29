@@ -14,6 +14,9 @@ PRODUCTVERSION @IMAGER_VERSION_MAJOR@,@IMAGER_VERSION_MINOR@,@IMAGER_VERSION_PAT
             VALUE "CompanyName",     "Raspberry Pi Ltd"
             VALUE "FileDescription", "Raspberry Pi Imager"
             VALUE "FileVersion",     "@IMAGER_VERSION_STR@"
+            VALUE "InternalName",    "rpi-imager"
+            VALUE "OriginalFilename","rpi-imager.exe"
+            VALUE "ProductName",     "Raspberry Pi Imager"
             VALUE "ProductVersion",  "@IMAGER_VERSION_STR@"
         }
     }
