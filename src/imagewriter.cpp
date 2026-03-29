@@ -124,6 +124,100 @@ namespace {
         return QByteArray("#cloud-config\n") + body + QByteArray("\n");
     }
 
+    bool hasTopLevelYamlKey(const QByteArray &data, const QByteArray &key)
+    {
+        const QList<QByteArray> lines = stripCloudConfigHeader(data).split('\n');
+        const QByteArray prefix = key + ":";
+        for (const QByteArray &line : lines) {
+            QByteArray trimmed = line.trimmed();
+            if (trimmed.isEmpty() || trimmed.startsWith('#')) {
+                continue;
+            }
+            if (!line.isEmpty() && (line[0] == ' ' || line[0] == '\t')) {
+                continue;
+            }
+            if (trimmed.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    QByteArray extractTopLevelYamlBlock(const QByteArray &data, const QByteArray &key)
+    {
+        const QList<QByteArray> lines = stripCloudConfigHeader(data).split('\n');
+        const QByteArray prefix = key + ":";
+        QByteArray block;
+        bool inBlock = false;
+
+        for (const QByteArray &line : lines) {
+            QByteArray trimmed = line.trimmed();
+            const bool isTopLevel = !line.isEmpty() && line[0] != ' ' && line[0] != '\t';
+
+            if (!inBlock) {
+                if (isTopLevel && trimmed.startsWith(prefix)) {
+                    inBlock = true;
+                    block += line + '\n';
+                }
+                continue;
+            }
+
+            if (isTopLevel && !trimmed.isEmpty() && !trimmed.startsWith('#') && !trimmed.startsWith("- ")) {
+                break;
+            }
+            block += line + '\n';
+        }
+
+        return block.trimmed();
+    }
+
+    QByteArray mergeCloudConfigMissingBaseSections(const QByteArray &baseCloudConfig, const QByteArray &overlayCloudConfig)
+    {
+        QByteArray overlayBody = stripCloudConfigHeader(overlayCloudConfig);
+        if (overlayBody.isEmpty()) {
+            return ensureCloudConfigHeader(baseCloudConfig);
+        }
+
+        QByteArray merged;
+        const QList<QByteArray> keysToCarry = {
+            "users",
+            "ssh_pwauth",
+            "enable_ssh",
+            "timezone",
+            "keyboard",
+            "rpi"
+        };
+
+        for (const QByteArray &key : keysToCarry) {
+            if (hasTopLevelYamlKey(overlayBody, key)) {
+                continue;
+            }
+            QByteArray block = extractTopLevelYamlBlock(baseCloudConfig, key);
+            if (key == "users") {
+                const QList<QByteArray> lines = block.split('\n');
+                bool hasUserEntries = false;
+                for (const QByteArray &line : lines) {
+                    if (line.startsWith("- ") || line.startsWith("  - ") || line.startsWith("\t- ")) {
+                        hasUserEntries = true;
+                        break;
+                    }
+                }
+                if (!hasUserEntries) {
+                    block.clear();
+                }
+            }
+            if (!block.isEmpty()) {
+                merged += block + "\n\n";
+            }
+        }
+
+        merged += overlayBody.trimmed();
+        if (!merged.endsWith('\n')) {
+            merged += '\n';
+        }
+        return QByteArray("#cloud-config\n") + merged;
+    }
+
     QByteArray buildMultipartCloudConfig(const QByteArray &baseCloudConfig, const QByteArray &overlayCloudConfig)
     {
         const QByteArray basePart = ensureCloudConfigHeader(baseCloudConfig);
@@ -4072,7 +4166,20 @@ void ImageWriter::applyCustomisationFromSettings(const QVariantMap &settings)
     // Merge runtime settings with persisted settings so provisioning does not
     // accidentally drop base user/SSH/Wi-Fi/locale values.
     QVariantMap effectiveSettings = getSavedCustomisationSettings();
+    const QSet<QString> preserveWhenBlank = {
+        QStringLiteral("sshUserName"),
+        QStringLiteral("sshUserPassword"),
+        QStringLiteral("sshAuthorizedKeys"),
+        QStringLiteral("sshPublicKey")
+    };
     for (auto it = settings.constBegin(); it != settings.constEnd(); ++it) {
+        if (preserveWhenBlank.contains(it.key())) {
+            const QVariant existing = effectiveSettings.value(it.key());
+            const QString incoming = it.value().toString();
+            if (!existing.toString().isEmpty() && incoming.trimmed().isEmpty()) {
+                continue;
+            }
+        }
         effectiveSettings.insert(it.key(), it.value());
     }
 
@@ -4106,15 +4213,16 @@ void ImageWriter::applyCustomisationFromSettings(const QVariantMap &settings)
             return;
         }
 
-        // Always keep standard wizard cloud-init settings (users/SSH/Wi-Fi/locale/etc)
-        // and layer repository provisioning cloud-init as an additional cloud-config part.
+        // Preserve direct repository cloud-init while carrying over essential
+        // Imager-generated sections such as user creation if they are missing
+        // from the repository payload.
         const bool sshEnabled = effectiveSettings.value("sshEnabled").toBool();
         const bool hasCcRpi = imageSupportsCcRpi();
         QByteArray baseCloud = rpi_imager::CustomisationGenerator::generateCloudInitUserData(
             effectiveSettings, _piConnectToken, hasCcRpi, sshEnabled, getCurrentUser());
         QByteArray netcfg = rpi_imager::CustomisationGenerator::generateCloudInitNetworkConfig(
             effectiveSettings, hasCcRpi);
-        QByteArray mergedCloud = buildMultipartCloudConfig(baseCloud, repoUserData);
+        QByteArray mergedCloud = mergeCloudConfigMissingBaseSections(baseCloud, repoUserData);
         qDebug() << "Provisioning merge:"
                  << "baseCloud bytes=" << baseCloud.size()
                  << "repoCloud bytes=" << repoUserData.size()
