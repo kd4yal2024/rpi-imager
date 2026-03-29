@@ -80,6 +80,7 @@ WizardStepBase {
             wizardContainer.localeConfigured ||
             wizardContainer.userConfigured ||
             wizardContainer.wifiConfigured ||
+            wizardContainer.provisioningConfigured ||
             wizardContainer.sshEnabled ||
             wizardContainer.piConnectEnabled ||
             wizardContainer.featUsbGadgetEnabled
@@ -222,6 +223,7 @@ WizardStepBase {
                     if (root.wizardContainer.localeConfigured) items.push(CommonStrings.localeConfigured)
                     if (root.wizardContainer.userConfigured) items.push(CommonStrings.userAccountConfigured)
                     if (root.wizardContainer.wifiConfigured) items.push(CommonStrings.wifiConfigured)
+                    if (root.wizardContainer.provisioningConfigured) items.push(qsTr("Provisioning"))
                     if (root.wizardContainer.sshEnabled) items.push(CommonStrings.sshEnabled)
                     if (root.wizardContainer.piConnectEnabled) items.push(CommonStrings.piConnectEnabled)
                     if (root.wizardContainer.featUsbGadgetEnabled) items.push(CommonStrings.usbGadgetEnabled)
@@ -258,6 +260,7 @@ WizardStepBase {
                         Text { text: "• " + CommonStrings.localeConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.localeConfigured;           Accessible.role: Accessible.ListItem; Accessible.name: text }
                         Text { text: "• " + CommonStrings.userAccountConfigured;   font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.userConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
                         Text { text: "• " + CommonStrings.wifiConfigured;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.wifiConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + qsTr("Provisioning");                  font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.provisioningConfigured;     Accessible.role: Accessible.ListItem; Accessible.name: text }
                         Text { text: "• " + CommonStrings.sshEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.sshEnabled;                 Accessible.role: Accessible.ListItem; Accessible.name: text }
                         Text { text: "• " + CommonStrings.piConnectEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.piConnectEnabled;           Accessible.role: Accessible.ListItem; Accessible.name: text }
                         Text { text: "• " + CommonStrings.usbGadgetEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.featUsbGadgetEnabled;       Accessible.role: Accessible.ListItem; Accessible.name: text }

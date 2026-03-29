@@ -2213,16 +2213,20 @@ qint64 DownloadThread::_sectorsWritten()
     return -1;
 }
 
-void DownloadThread::setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudInitNetwork, const QByteArray &initFormat, const ImageOptions::AdvancedOptions opts)
+void DownloadThread::setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudInitNetwork, const QByteArray &cloudinitMetaData, const QByteArray &initFormat, const ImageOptions::AdvancedOptions opts)
 {
     _config = config;
     _cmdline = cmdline;
     _firstrun = firstrun;
     _cloudinit = cloudinit;
     _cloudinitNetwork = cloudInitNetwork;
+    _cloudinitMetaData = cloudinitMetaData;
     _initFormat = initFormat;
     _advancedOptions = opts;
-    qDebug() << "DownloadThread::setImageCustomisation - initFormat:" << initFormat << "cloudinit empty:" << cloudinit.isEmpty() << "cloudinitNetwork empty:" << cloudInitNetwork.isEmpty();
+    qDebug() << "DownloadThread::setImageCustomisation - initFormat:" << initFormat
+             << "cloudinit empty:" << cloudinit.isEmpty()
+             << "cloudinitNetwork empty:" << cloudInitNetwork.isEmpty()
+             << "cloudinitMeta empty:" << cloudinitMetaData.isEmpty();
 }
 
 void DownloadThread::setDebugDirectIO(bool enabled)
@@ -2379,8 +2383,26 @@ bool DownloadThread::_customizeImage()
             // Write meta-data file for NoCloud datasource
             // cloud-init requires meta-data to be present for proper datasource detection
             // instance-id should be unique per imaging to ensure cloud-init processes user-data
-            QByteArray instanceId = "rpi-imager-" + QByteArray::number(QDateTime::currentMSecsSinceEpoch());
-            QByteArray metadata = "instance-id: " + instanceId + "\n";
+            QByteArray metadata;
+            if (!_cloudinitMetaData.isEmpty()) {
+                metadata = _cloudinitMetaData.trimmed();
+                if (!metadata.endsWith('\n')) {
+                    metadata += "\n";
+                }
+            }
+
+            QByteArray instanceId;
+            for (const QByteArray &line : metadata.split('\n')) {
+                QByteArray trimmedLine = line.trimmed();
+                if (trimmedLine.startsWith("instance-id:")) {
+                    instanceId = trimmedLine.mid(QByteArray("instance-id:").size()).trimmed();
+                    break;
+                }
+            }
+            if (instanceId.isEmpty()) {
+                instanceId = "rpi-imager-" + QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+                metadata += "instance-id: " + instanceId + "\n";
+            }
             fat->writeFile("meta-data", metadata);
 
             // Expose datasource type and instance-id on kernel cmdline so that
@@ -2393,8 +2415,28 @@ bool DownloadThread::_customizeImage()
 
             if (!_cloudinit.isEmpty())
             {
-                _cloudinit = "#cloud-config\n"+_cloudinit;
-                fat->writeFile("user-data", _cloudinit);
+                // Accept both plain cloud-config YAML and MIME multipart user-data.
+                // Only prepend #cloud-config for plain YAML payloads.
+                QByteArray cloudinitPayload = _cloudinit;
+                QByteArray trimmed = cloudinitPayload.trimmed();
+
+                // Defensive normalization: if a multipart payload was accidentally prefixed
+                // with "#cloud-config", strip everything before the MIME header.
+                const QByteArray multipartMarker("Content-Type: multipart/");
+                const int multipartPos = trimmed.indexOf(multipartMarker);
+                if (multipartPos > 0) {
+                    qDebug() << "_customizeImage: stripping non-MIME prefix before multipart cloud-init payload";
+                    trimmed = trimmed.mid(multipartPos);
+                }
+
+                const bool hasCloudConfigHeader = trimmed.startsWith("#cloud-config");
+                const bool hasMultipartHeader = trimmed.startsWith(multipartMarker);
+                if (!hasCloudConfigHeader && !hasMultipartHeader) {
+                    cloudinitPayload = "#cloud-config\n" + trimmed;
+                } else {
+                    cloudinitPayload = trimmed;
+                }
+                fat->writeFile("user-data", cloudinitPayload);
             }
 
             if (!_cloudinitNetwork.isEmpty())

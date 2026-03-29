@@ -86,6 +86,7 @@ void FastbootFlashThread::setImageCustomisation(const QByteArray &config,
                                                   const QByteArray &firstrun,
                                                   const QByteArray &cloudinit,
                                                   const QByteArray &cloudinitNetwork,
+                                                  const QByteArray &cloudinitMetaData,
                                                   const QByteArray &initFormat)
 {
     _config = config;
@@ -93,6 +94,7 @@ void FastbootFlashThread::setImageCustomisation(const QByteArray &config,
     _firstrun = firstrun;
     _cloudinit = cloudinit;
     _cloudinitNetwork = cloudinitNetwork;
+    _cloudinitMetaData = cloudinitMetaData;
     _initFormat = initFormat;
 }
 
@@ -351,8 +353,26 @@ bool FastbootFlashThread::applyCustomisation(fastboot::FastbootProtocol& fb,
     bool initCloud = (_initFormat == "cloudinit" || _initFormat == "cloudinit-rpi");
     bool hasCloudContent = !_cloudinit.isEmpty() || !_cloudinitNetwork.isEmpty();
     if (initCloud && hasCloudContent) {
-        QByteArray instanceId = "rpi-imager-" + QByteArray::number(QDateTime::currentMSecsSinceEpoch());
-        QByteArray metadata = "instance-id: " + instanceId + "\n";
+        QByteArray metadata;
+        if (!_cloudinitMetaData.isEmpty()) {
+            metadata = _cloudinitMetaData.trimmed();
+            if (!metadata.endsWith('\n')) {
+                metadata += "\n";
+            }
+        }
+
+        QByteArray instanceId;
+        for (const QByteArray &line : metadata.split('\n')) {
+            QByteArray trimmedLine = line.trimmed();
+            if (trimmedLine.startsWith("instance-id:")) {
+                instanceId = trimmedLine.mid(QByteArray("instance-id:").size()).trimmed();
+                break;
+            }
+        }
+        if (instanceId.isEmpty()) {
+            instanceId = "rpi-imager-" + QByteArray::number(QDateTime::currentMSecsSinceEpoch());
+            metadata += "instance-id: " + instanceId + "\n";
+        }
         if (!fb.writeDeviceFile(transport, BOOT + "meta-data", toSpan(metadata), _cancelled)) {
             emit error(tr("Failed to write meta-data: %1")
                        .arg(QString::fromStdString(fb.lastError())));
@@ -362,7 +382,21 @@ bool FastbootFlashThread::applyCustomisation(fastboot::FastbootProtocol& fb,
         cmdlineAppend += " ds=nocloud;i=" + instanceId;
 
         if (!_cloudinit.isEmpty()) {
-            QByteArray userData = "#cloud-config\n" + _cloudinit;
+            QByteArray userData = _cloudinit;
+            QByteArray trimmed = userData.trimmed();
+            const QByteArray multipartMarker("Content-Type: multipart/");
+            const int multipartPos = trimmed.indexOf(multipartMarker);
+            if (multipartPos > 0) {
+                trimmed = trimmed.mid(multipartPos);
+            }
+
+            const bool hasCloudConfigHeader = trimmed.startsWith("#cloud-config");
+            const bool hasMultipartHeader = trimmed.startsWith(multipartMarker);
+            if (!hasCloudConfigHeader && !hasMultipartHeader) {
+                userData = "#cloud-config\n" + trimmed;
+            } else {
+                userData = trimmed;
+            }
             if (!fb.writeDeviceFile(transport, BOOT + "user-data", toSpan(userData), _cancelled)) {
                 emit error(tr("Failed to write user-data: %1")
                            .arg(QString::fromStdString(fb.lastError())));

@@ -13,6 +13,8 @@ Item {
     id: root
     
     default property alias content: childrenLayout.children
+    // Backward-compatible alias for older QML that used `body`
+    property alias body: childrenLayout.children
     
     Layout.fillWidth: true
     Layout.preferredHeight: childrenLayout.implicitHeight
