@@ -45,6 +45,7 @@ public:
                                 const QByteArray &firstrun,
                                 const QByteArray &cloudinit,
                                 const QByteArray &cloudinitNetwork,
+                                const QByteArray &cloudinitMetaData,
                                 const QByteArray &initFormat);
 
     // Set optional bmap URL for DONT_CARE block optimisation.
@@ -100,6 +101,7 @@ private:
     QByteArray _firstrun;
     QByteArray _cloudinit;
     QByteArray _cloudinitNetwork;
+    QByteArray _cloudinitMetaData;
     QByteArray _initFormat;
 };
 
