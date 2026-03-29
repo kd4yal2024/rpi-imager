@@ -4,6 +4,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
+#include "rpiboot/rpiboot_scanner.h"
 
 /*
  * SPDX-License-Identifier: Apache-2.0
@@ -21,7 +22,12 @@ DriveListModelPollThread::~DriveListModelPollThread()
     _terminate = true;
     _modeChanged.wakeAll();  // Wake thread if it's waiting
     if (!wait(2000)) {
+        // Thread is stuck (e.g. blocked in libusb_init due to a libusb macOS
+        // deadlock).  Force-kill it and wait for it to die — QThread::~QThread()
+        // calls qFatal() if the thread is still running when it runs, so we
+        // must not return until the OS has confirmed the thread is gone.
         terminate();
+        wait();
     }
 }
 
@@ -73,6 +79,12 @@ void DriveListModelPollThread::resume()
     setScanMode(ScanMode::Normal);
 }
 
+void DriveListModelPollThread::setRpibootEnabled(bool enabled)
+{
+    _rpibootEnabled.store(enabled, std::memory_order_relaxed);
+    qDebug() << "Rpiboot scanning" << (enabled ? "enabled" : "disabled");
+}
+
 void DriveListModelPollThread::run()
 {
 #ifdef Q_OS_WIN
@@ -106,7 +118,12 @@ void DriveListModelPollThread::run()
         
         // Perform the scan
         t1.start();
-        emit newDriveList( Drivelist::ListStorageDevices() );
+        auto driveList = Drivelist::ListStorageDevices();
+        if (_rpibootEnabled.load(std::memory_order_relaxed)) {
+            auto rpibootDevices = rpiboot::scanRpibootDevices();
+            driveList.insert(driveList.end(), rpibootDevices.begin(), rpibootDevices.end());
+        }
+        emit newDriveList(driveList);
         quint32 elapsed = static_cast<quint32>(t1.elapsed());
         
         // Emit timing event for performance tracking (always, but listeners can filter)

@@ -32,6 +32,7 @@
 #include "device_info.h"
 #include "imageadvancedoptions.h"
 #include "performancestats.h"
+#include "rpiboot/rpiboot_types.h"
 
 class QQmlApplicationEngine;
 class DownloadThread;
@@ -41,6 +42,8 @@ class WriteProgressWatchdog;
 #ifndef CLI_ONLY_BUILD
 class NativeFileDialog;
 #endif
+class RpibootThread;
+class FastbootFlashThread;
 
 class ImageWriter : public QObject
 {
@@ -56,6 +59,7 @@ public:
         Writing,
         Verifying,
         Finalizing,
+        Cancelling,
         Succeeded,
         Failed,
         Cancelled
@@ -73,7 +77,7 @@ public:
     Q_INVOKABLE bool isExtractSizeKnown() const { return _extractSizeKnown; }
 
     /* Set URL to download from, and if known download length and uncompressed length */
-    Q_INVOKABLE void setSrc(const QUrl &url, quint64 downloadLen = 0, quint64 extrLen = 0, QByteArray expectedHash = "", bool multifilesinzip = false, QString parentcategory = "", QString osname = "", QByteArray initFormat = "", QString releaseDate = "");
+    Q_INVOKABLE void setSrc(const QUrl &url, quint64 downloadLen = 0, quint64 extrLen = 0, QByteArray expectedHash = "", bool multifilesinzip = false, QString parentcategory = "", QString osname = "", QByteArray initFormat = "", QString releaseDate = "", QString bmapUrl = "");
 
     /* Set device to write to */
     Q_INVOKABLE void setDst(const QString &device, quint64 deviceSize = 0);
@@ -273,7 +277,9 @@ public:
     Q_INVOKABLE void setDebugIPv4Only(bool enabled);
     Q_INVOKABLE bool getDebugSkipEndOfDevice() const;
     Q_INVOKABLE void setDebugSkipEndOfDevice(bool enabled);
-    
+    Q_INVOKABLE bool getDebugRpiboot() const;
+    Q_INVOKABLE void setDebugRpiboot(bool enabled);
+
     // Customisation API
     Q_INVOKABLE void applyCustomisationFromSettings(const QVariantMap &settings);  // Main entry: generates scripts from settings
     Q_INVOKABLE void setImageCustomisation(const QByteArray &config, const QByteArray &cmdline, const QByteArray &firstrun, const QByteArray &cloudinit, const QByteArray &cloudinitNetwork, const QByteArray &cloudinitMetaData = {}, const ImageOptions::AdvancedOptions opts = {}, const QByteArray &initFormat = {});  // Advanced: bypass generator with pre-made scripts
@@ -334,6 +340,11 @@ public:
 
     /* Check if audio notification (beep) is available on this system */
     Q_INVOKABLE bool isBeepAvailable();
+
+    /* Set an rpiboot device as the write target */
+    Q_INVOKABLE void setRpibootDevice(const QString &deviceId);
+    /* Returns true if the current target is an rpiboot device */
+    Q_INVOKABLE bool isRpibootDevice() const;
 
     /* Performance data export - opens native save dialog and writes performance data to file.
        If native dialogs aren't available, emits performanceSaveDialogNeeded for QML fallback. */
@@ -411,6 +422,8 @@ protected slots:
     void onCacheVerificationComplete(bool isValid);
     void onSelectedDeviceRemoved(const QString &device);
     void onOsListRefreshTimeout();
+    void onRpibootFastbootReady(const QString &fastbootId);
+    void onRpibootError(const QString &msg);
 
 private:
     void setWriteState(WriteState state);
@@ -438,7 +451,7 @@ private:
 
 protected:
     QUrl _src, _repo;
-    QString _dst, _parentCategory, _osName, _osReleaseDate, _currentLang, _currentLangcode, _currentKeyboard;
+    QString _dst, _parentCategory, _osName, _osReleaseDate, _currentLang, _currentLangcode, _currentKeyboard, _bmapUrl;
     QByteArray _expectedHash, _cmdline, _config, _firstrun, _cloudinit, _cloudinitNetwork, _cloudinitMetaData, _initFormat;
     ImageOptions::AdvancedOptions _advancedOptions;
     quint64 _downloadLen, _extrLen, _devLen, _dlnow, _verifynow;
@@ -484,6 +497,13 @@ protected:
     int _debugAsyncQueueDepth;
     bool _debugIPv4Only;
     bool _debugSkipEndOfDevice;
+    bool _debugRpiboot;
+
+    QString _rpibootDeviceId;
+    bool _isRpibootDevice = false;
+    RpibootThread *_rpibootThread = nullptr;
+    FastbootFlashThread *_fastbootFlashThread = nullptr;
+    rpiboot::SideloadMode _rpibootSideloadMode = rpiboot::SideloadMode::Fastboot;
 
     void _parseCompressedFile();
     void _parseXZFile();

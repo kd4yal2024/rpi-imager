@@ -15,6 +15,7 @@ Item {
     id: root
     
     required property ImageWriter imageWriter
+    property int sidebarWidthValue: Style.sidebarWidth
     property var optionsPopup: null
     // Show landing language selection step at startup
     property bool showLanguageSelection: false
@@ -37,8 +38,13 @@ Item {
     // Each bit represents a step: bit 0 = Device, bit 1 = OS, etc.
     property int permissibleStepsBitmap: 1  // Start with Device step (bit 0) always permissible
     
-    // Track writing state
-    property bool isWriting: false
+    // Track writing state — derived from the C++ state machine
+    readonly property bool isWriting: {
+        var s = imageWriter.writeState
+        return s === ImageWriter.Preparing || s === ImageWriter.Writing ||
+               s === ImageWriter.Verifying || s === ImageWriter.Finalizing ||
+               s === ImageWriter.Cancelling
+    }
     
     // Track if we're in "write another" flow (skip to writing step after storage selection)
     property bool writeAnotherMode: false
@@ -68,6 +74,8 @@ Item {
     property bool piConnectAvailable: false
     // Whether selected OS supports Secure Boot signing
     property bool secureBootAvailable: false
+    // Whether selected OS supports passwordless sudo configuration
+    property bool passwordlessSudoAvailable: false
     // Whether secure boot key is configured in App Options
     property bool secureBootKeyConfigured: false
 
@@ -175,10 +183,16 @@ Item {
         // Each step can then read from this and update it as needed
         if (imageWriter) {
             customizationSettings = imageWriter.getSavedCustomisationSettings()
-            
+
             // Check if secure boot RSA key is configured
             var rsaKeyPath = imageWriter.getStringSetting("secureboot_rsa_key")
             secureBootKeyConfigured = (rsaKeyPath && rsaKeyPath.length > 0)
+
+            // Restore persisted sidebar width
+            var savedWidth = imageWriter.getStringSetting("sidebarWidth")
+            if (savedWidth) {
+                sidebarWidthValue = clampSidebarWidth(parseInt(savedWidth))
+            }
         }
     }
     
@@ -214,6 +228,16 @@ Item {
     ]
     
     readonly property int firstCustomizationStep: stepHostnameCustomization
+
+    function clampSidebarWidth(width) {
+        return Math.max(Style.sidebarMinWidth, Math.min(Style.sidebarMaxWidth, width))
+    }
+
+    function saveSidebarWidth(width) {
+        if (imageWriter) {
+            imageWriter.setSetting("sidebarWidth", width.toString())
+        }
+    }
 
     // Helper function to map wizard step to sidebar index
     function getSidebarIndex(wizardStep) {
@@ -352,6 +376,7 @@ Item {
         // Reset OS capability flags - these will be set correctly by OS selection
         piConnectAvailable = false
         secureBootAvailable = false
+        passwordlessSudoAvailable = false
         ccRpiAvailable = false
         ifI2cEnabled = false
         ifSpiEnabled = false
@@ -394,7 +419,10 @@ Item {
         
         // Sidebar
         Rectangle {
-            Layout.preferredWidth: Style.sidebarWidth
+            id: sidebar
+            Layout.preferredWidth: root.sidebarWidthValue
+            Layout.minimumWidth: Style.sidebarMinWidth
+            Layout.maximumWidth: Style.sidebarMaxWidth
             Layout.fillHeight: true
             color: Style.sidebarBackgroundColour
             border.color: Style.sidebarBorderColour
@@ -423,7 +451,7 @@ Item {
                 Text {
                     id: sidebarHeader
                     text: qsTr("Setup steps")
-                    font.pixelSize: Style.fontSizeHeading
+                    font.pointSize: Style.fontSizeHeading
                     font.family: Style.fontFamilyBold
                     font.bold: true
                     color: Style.sidebarTextOnInactiveColor
@@ -435,32 +463,34 @@ Item {
                 
                 // Step list
                 Repeater {
+                    id: stepRepeater
                     model: root.stepNames
-                    
+
                     Rectangle {
                         id: stepItem
                         required property int index
                         required property var modelData
                         Layout.fillWidth: true
-                        Layout.preferredHeight: (function(){
-                            var base = Style.sidebarItemHeight
-                            return sublistContainer.visible ? (base + Style.spacingXXSmall + sublistContainer.implicitHeight) : base
-                        })()
+                        Layout.preferredHeight: sublistContainer.visible
+                            ? (Style.sidebarItemHeight + Style.spacingXXSmall + sublistContainer.implicitHeight)
+                            : Style.sidebarItemHeight
                         color: Style.transparent
                         border.color: Style.transparent
                         border.width: 0
                         radius: 0
-                        property bool isClickable: (function(){
+                        // Reference permissibleStepsBitmap and currentStep directly so QML
+                        // tracks them as dependencies and re-evaluates when they change.
+                        property int _targetStep: root.getWizardStepFromSidebarIndex(stepItem.index)
+                        property bool isClickable: {
                             if (root.isWriting) return false
                             // If customization not supported, do not allow navigating back to customization group
                             if (!root.customizationSupported && stepItem.index === 3) return false
-                            
-                            // Get the step index for this sidebar item
-                            var targetStep = root.getWizardStepFromSidebarIndex(stepItem.index)
-                            
-                            // Allow navigation to any permissible step or backward navigation
-                            return root.isStepPermissible(targetStep) || targetStep < root.currentStep
-                        })()
+
+                            // Read permissibleStepsBitmap directly to create a reactive dependency
+                            var bit = 1 << _targetStep
+                            var isPermissible = (root.permissibleStepsBitmap & bit) !== 0
+                            return isPermissible || _targetStep < root.currentStep
+                        }
  
                         // Header band with active background/border
                         Rectangle {
@@ -501,7 +531,7 @@ Item {
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
                                     text: stepItem.modelData
-                                    font.pixelSize: Style.fontSizeSidebarItem
+                                    font.pointSize: Style.fontSizeSidebarItem
                                     font.family: Style.fontFamily
                                     color: (stepItem.index > root.getSidebarIndex(root.currentStep) || (stepItem.index === 3 && !root.customizationSupported))
                                                ? Style.formLabelDisabledColor
@@ -615,7 +645,7 @@ Item {
                                             Layout.fillWidth: true
                                             Layout.alignment: Qt.AlignVCenter
                                             text: subItem.modelData
-                                            font.pixelSize: Style.fontSizeCaption
+                                            font.pointSize: Style.fontSizeCaption
                                             font.family: Style.fontFamily
                                             font.bold: subItem.isConfigured
                                             font.underline: subItem.isCurrentStep
@@ -677,17 +707,62 @@ Item {
                 }
             }
         }
-        // Vertical separator between sidebar and content
+        // Interactive drag handle for resizing sidebar
         Item {
-            Layout.preferredWidth: 1
+            id: dragHandle
+            Layout.preferredWidth: Style.sidebarDragHandleWidth
             Layout.fillHeight: true
+
+            readonly property bool isActive: dragHandleMouseArea.containsMouse || dragHandleMouseArea.pressed
+
+            // Vertical separator line
             Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.verticalCenter: parent.verticalCenter
                 width: 1
                 height: parent.height * 0.75
-                color: Style.titleSeparatorColor
+                color: dragHandle.isActive ? Style.sidebarDragHandleHoverColor : Style.titleSeparatorColor
+                Behavior on color { ColorAnimation { duration: 150 } }
             }
+
+            // Hover/drag highlight background
+            Rectangle {
+                anchors.fill: parent
+                color: dragHandle.isActive ? Style.sidebarDragHandleHoverBackground : "transparent"
+                Behavior on color { ColorAnimation { duration: 150 } }
+            }
+
+            MouseArea {
+                id: dragHandleMouseArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+
+                property real startX: 0
+                property real startWidth: 0
+
+                onPressed: function(mouse) {
+                    startX = mouse.x + dragHandle.x
+                    startWidth = root.sidebarWidthValue
+                }
+
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        var delta = (mouse.x + dragHandle.x) - startX
+                        root.sidebarWidthValue = root.clampSidebarWidth(startWidth + delta)
+                    }
+                }
+
+                onReleased: root.saveSidebarWidth(root.sidebarWidthValue)
+
+                onDoubleClicked: {
+                    root.sidebarWidthValue = Style.sidebarWidth
+                    root.saveSidebarWidth(Style.sidebarWidth)
+                }
+            }
+
+            Accessible.role: Accessible.Separator
+            Accessible.name: qsTr("Sidebar resize handle")
         }
 
         // Main content area
@@ -785,6 +860,8 @@ Item {
             // Before entering the writing step, apply customization (when supported)
             if (nextIndex === stepWriting) {
                 if (customizationSupported && imageWriter) {
+                    // Pass session flags so the generator can skip unconfigured sections
+                    customizationSettings.wifiConfigured = wifiConfigured
                     // Pass the complete customizationSettings object directly to the generator
                     // This includes both persistent settings (hostname, wifi, etc.) and
                     // ephemeral settings (piConnectEnabled) from the current wizard session
@@ -1174,7 +1251,7 @@ Item {
         Text {
             id: titleText
             text: qsTr("Replace existing Raspberry Pi Connect token?")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -1194,7 +1271,7 @@ Item {
             text: qsTr("A new Raspberry Pi Connect token was received that differs from your current one.\n\n") +
                   qsTr("Do you want to overwrite the existing token?\n\n") +
                   qsTr("Warning: Only overwrite the token if you initiated this action.")
-            font.pixelSize: Style.fontSizeFormLabel
+            font.pointSize: Style.fontSizeFormLabel
             font.family: Style.fontFamily
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
@@ -1333,7 +1410,7 @@ Item {
             text: repositoryUrlDialog.isLocalFile 
                 ? qsTr("Open local repository file?")
                 : qsTr("Switch to a custom repository?")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -1354,7 +1431,7 @@ Item {
                 ? qsTr("You are opening a local Raspberry Pi Imager manifest file. This will replace the current OS list with the contents of this file.")
                 : qsTr("A website is requesting to switch Raspberry Pi Imager to use a custom OS repository.\n\n") +
                   qsTr("Only accept if you trust this source and intentionally clicked a link to open this repository.")
-            font.pixelSize: Style.fontSizeFormLabel
+            font.pointSize: Style.fontSizeFormLabel
             font.family: Style.fontFamily
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
@@ -1382,7 +1459,7 @@ Item {
                 anchors.fill: parent
                 anchors.margins: Style.spacingSmall
                 text: repositoryUrlDialog.repoUrl
-                font.pixelSize: Style.fontSizeCaption
+                font.pointSize: Style.fontSizeCaption
                 font.family: "monospace"
                 color: Style.formLabelColor
                 wrapMode: Text.WrapAnywhere
@@ -1445,20 +1522,9 @@ Item {
     }
     
     function onWriteCancelled() {
-        // Reset write state
-        isWriting = false
-        
         // Navigate back to writing step (which will show the summary since isWriting is false)
         if (currentStep !== stepWriting) {
             jumpToStep(stepWriting)
-        }
-        
-        // Reset the writing step's state if it exists
-        if (wizardStack.currentItem && wizardStack.currentItem.objectName === "writingStep") {
-            wizardStack.currentItem.isWriting = false
-            wizardStack.currentItem.cancelPending = false
-            wizardStack.currentItem.isFinalising = false
-            wizardStack.currentItem.isComplete = false
         }
     }
     
@@ -1495,7 +1561,6 @@ Item {
         // Start at OS selection if offline, device selection if online
         currentStep = hasNetworkConnectivity ? 0 : 1
         permissibleStepsBitmap = 1  // Reset to only Device step permissible
-        isWriting = false
         writeAnotherMode = false
         selectedDeviceName = ""
         selectedOsName = ""
@@ -1541,6 +1606,7 @@ Item {
         // Reset only the storage selection to allow choosing a new storage device
         // while preserving device, OS, and customization settings
         selectedStorageName = ""
+        imageWriter.setDst("", 0)
         
         // Reset ephemeral Pi Connect state (session-only, not preserved)
         // The token is already cleared when write completes, but ensure the enabled flag is reset
@@ -1595,15 +1661,18 @@ Item {
             if (target > maxY) target = Math.max(0, maxY)
             sidebarScroll.contentY = target
         } else {
-            // Center main group item
+            // Center main group item using its actual position (accounts for
+            // variable-height items like the expanded Customisation sub-list)
             var sidebarIdx = getSidebarIndex(currentStep)
-            var mainRowH = Style.sidebarItemHeight + Style.spacingXSmall
-            // account for header and its bottom margin
-            var target2 = sidebarHeader.y + sidebarHeader.implicitHeight + Style.spacingSmall + sidebarIdx * mainRowH - (sidebarScroll.height/2 - Style.sidebarItemHeight/2)
-            if (target2 < 0) target2 = 0
-            var maxY2 = sidebarScroll.contentHeight - sidebarScroll.height
-            if (target2 > maxY2) target2 = Math.max(0, maxY2)
-            sidebarScroll.contentY = target2
+            var item = stepRepeater.itemAt(sidebarIdx)
+            if (item) {
+                var itemY = item.mapToItem(sidebarScroll.contentItem, 0, 0).y
+                var target2 = itemY - (sidebarScroll.height/2 - Style.sidebarItemHeight/2)
+                if (target2 < 0) target2 = 0
+                var maxY2 = sidebarScroll.contentHeight - sidebarScroll.height
+                if (target2 > maxY2) target2 = Math.max(0, maxY2)
+                sidebarScroll.contentY = target2
+            }
         }
     }
 } 

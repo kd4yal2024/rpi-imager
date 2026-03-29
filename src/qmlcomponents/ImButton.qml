@@ -11,6 +11,7 @@ import RpiImager
 Button {
     id: control
     font.family: Style.fontFamily
+    font.pointSize: Style.fontSizeSm
     font.capitalization: Font.AllUppercase
     
     // Allow instances to provide a custom accessibility description
@@ -50,6 +51,7 @@ Button {
     }
 
     activeFocusOnTab: true
+    focusPolicy: Qt.TabFocus
     
     // Accessibility properties
     Accessible.role: Accessible.Button

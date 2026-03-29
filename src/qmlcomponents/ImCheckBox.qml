@@ -12,7 +12,10 @@ import RpiImager
 CheckBox {
     id: control
     Material.accent: Style.formControlActiveColor
+    font.pointSize: Style.fontSizeSm
+    font.family: Style.fontFamily
     activeFocusOnTab: true
+    focusPolicy: Qt.TabFocus
     
     // Export the natural/desired width for dialog sizing calculations
     readonly property real naturalWidth: textMetrics.width + (indicator ? indicator.width : 20) + spacing + leftPadding + rightPadding
@@ -71,7 +74,7 @@ CheckBox {
                 anchors.centerIn: parent
                 text: "✓"
                 color: Style.mainBackgroundColor
-                font.pixelSize: 14
+                font.pointSize: Style.fontSizeSm
                 font.bold: true
                 visible: control.checked
             }

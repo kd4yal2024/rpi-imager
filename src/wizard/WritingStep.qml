@@ -56,15 +56,19 @@ WizardStepBase {
         }
     }
     backButtonAccessibleDescription: qsTr("Return to previous customization step")
-    nextButtonEnabled: root.isWriting || root.isComplete || imageWriter.readyToWrite()
+    nextButtonEnabled: root.isWriting || root.isComplete || (!beginWriteDelay.running && imageWriter.readyToWrite())
     showBackButton: true
 
-    property bool isWriting: false
-    property bool isVerifying: false
-    property bool cancelPending: false
-    property bool isFinalising: false
-    property bool isComplete: false
-    property bool confirmOpen: false
+    readonly property bool isWriting: {
+        var s = imageWriter.writeState
+        return s === ImageWriter.Preparing || s === ImageWriter.Writing ||
+               s === ImageWriter.Verifying || s === ImageWriter.Finalizing ||
+               s === ImageWriter.Cancelling
+    }
+    readonly property bool isVerifying: imageWriter.writeState === ImageWriter.Verifying
+    readonly property bool isCancelling: imageWriter.writeState === ImageWriter.Cancelling
+    readonly property bool isFinalising: imageWriter.writeState === ImageWriter.Finalizing
+    readonly property bool isComplete: imageWriter.writeState === ImageWriter.Succeeded
     property string bottleneckStatus: ""
     property int writeThroughputKBps: 0
     property string operationWarning: ""  // Non-fatal warning message (e.g., sync fallback)
@@ -83,7 +87,7 @@ WizardStepBase {
     )
 
     // Disable back while writing
-    backButtonEnabled: !root.isWriting && !root.cancelPending && !root.isFinalising
+    backButtonEnabled: !root.isWriting
 
     // Content
     content: [
@@ -102,12 +106,12 @@ WizardStepBase {
             Layout.maximumWidth: Style.sectionMaxWidth
             Layout.alignment: Qt.AlignHCenter
             spacing: Style.spacingMedium
-            visible: !root.isWriting && !root.cancelPending && !root.isFinalising && !root.isComplete
+            visible: !root.isWriting && !root.isComplete
 
             Text {
                 id: summaryHeading
                 text: qsTr("Summary")
-                font.pixelSize: Style.fontSizeHeading
+                font.pointSize: Style.fontSizeHeading
                 font.family: Style.fontFamilyBold
                 font.bold: true
                 color: Style.formLabelColor
@@ -129,7 +133,7 @@ WizardStepBase {
                 Text {
                     id: deviceLabel
                     text: CommonStrings.device
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
                     Accessible.role: Accessible.StaticText
@@ -142,7 +146,7 @@ WizardStepBase {
                 MarqueeText {
                     id: deviceValue
                     text: wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
                     color: Style.formLabelColor
@@ -153,7 +157,7 @@ WizardStepBase {
                 Text {
                     id: osLabel
                     text: qsTr("Operating system:")
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
                     Accessible.role: Accessible.StaticText
@@ -166,7 +170,7 @@ WizardStepBase {
                 MarqueeText {
                     id: osValue
                     text: wizardContainer.selectedOsName || CommonStrings.noImageSelected
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
                     color: Style.formLabelColor
@@ -177,7 +181,7 @@ WizardStepBase {
                 Text {
                     id: storageLabel
                     text: CommonStrings.storage
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
                     Accessible.role: Accessible.StaticText
@@ -190,7 +194,7 @@ WizardStepBase {
                 MarqueeText {
                     id: storageValue
                     text: wizardContainer.selectedStorageName || CommonStrings.noStorageSelected
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
                     color: Style.formLabelColor
@@ -207,12 +211,12 @@ WizardStepBase {
             Layout.maximumWidth: Style.sectionMaxWidth
             Layout.alignment: Qt.AlignHCenter
             spacing: Style.spacingMedium
-            visible: !root.isWriting && !root.cancelPending && !root.isFinalising && !root.isComplete && root.anyCustomizationsApplied
+            visible: !root.isWriting && !root.isComplete && root.anyCustomizationsApplied
 
             Text {
                 id: customizationsHeading
                 text: qsTr("Customisations to apply:")
-                font.pixelSize: Style.fontSizeHeading
+                font.pointSize: Style.fontSizeHeading
                 font.family: Style.fontFamilyBold
                 font.bold: true
                 color: Style.formLabelColor
@@ -231,6 +235,7 @@ WizardStepBase {
                 Layout.maximumHeight: Math.round(root.height * 0.4)
                 clip: true
                 activeFocusOnTab: true
+                focusPolicy: Qt.TabFocus
                 Accessible.role: Accessible.List
                 Accessible.name: {
                     // Build a list of visible customizations to announce
@@ -272,18 +277,18 @@ WizardStepBase {
                         id: customizationsColumn
                         width: parent.width
                         spacing: Style.spacingXSmall
-                        Text { text: "• " + CommonStrings.hostnameConfigured;      font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.hostnameConfigured;         Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.localeConfigured;        font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.localeConfigured;           Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.userAccountConfigured;   font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.userConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.wifiConfigured;          font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.wifiConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + qsTr("Provisioning");                  font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.provisioningConfigured;     Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.sshEnabled;              font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.sshEnabled;                 Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.piConnectEnabled;        font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.piConnectEnabled;           Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.usbGadgetEnabled;        font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.featUsbGadgetEnabled;       Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.i2cEnabled;              font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifI2cEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.spiEnabled;              font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSpiEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.onewireEnabled;          font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.if1WireEnabled;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.serialConfigured;        font.pixelSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSerial !== "" && wizardContainer.ifSerial !== "Disabled"; Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.hostnameConfigured;      font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.hostnameConfigured;         Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.localeConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.localeConfigured;           Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.userAccountConfigured;   font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.userConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.wifiConfigured;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.wifiConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + qsTr("Provisioning");                  font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.provisioningConfigured;     Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.sshEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.sshEnabled;                 Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.piConnectEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.piConnectEnabled;           Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.usbGadgetEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.featUsbGadgetEnabled;       Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.i2cEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifI2cEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.spiEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSpiEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.onewireEnabled;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.if1WireEnabled;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.serialConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSerial !== "" && wizardContainer.ifSerial !== "Disabled"; Accessible.role: Accessible.ListItem; Accessible.name: text }
                     }
                 }
                 ScrollBar.vertical: ScrollBar {
@@ -300,12 +305,12 @@ WizardStepBase {
             Layout.maximumWidth: Style.sectionMaxWidth
             Layout.alignment: Qt.AlignHCenter
             spacing: Style.spacingMedium
-            visible: root.isWriting || root.cancelPending || root.isFinalising || root.isComplete
+            visible: root.isWriting || root.isComplete
 
             Text {
                 id: progressText
                 text: qsTr("Starting write process...")
-                font.pixelSize: Style.fontSizeHeading
+                font.pointSize: Style.fontSizeHeading
                 font.family: Style.fontFamilyBold
                 font.bold: true
                 color: Style.formLabelColor
@@ -329,7 +334,7 @@ WizardStepBase {
 
                 Material.accent: Style.progressBarVerifyForegroundColor
                 Material.background: Style.progressBarBackgroundColor
-                visible: (root.isWriting || root.isFinalising)
+                visible: root.isWriting
                 Accessible.role: Accessible.ProgressBar
                 Accessible.name: qsTr("Write progress")
                 Accessible.description: progressText.text
@@ -347,7 +352,7 @@ WizardStepBase {
                     }
                     return ""
                 }
-                font.pixelSize: Style.fontSizeSmall
+                font.pointSize: Style.fontSizeSmall
                 font.family: Style.fontFamily
                 color: Style.formLabelDisabledColor
                 Layout.fillWidth: true
@@ -359,7 +364,7 @@ WizardStepBase {
             Text {
                 id: operationWarningText
                 text: "⚠ " + root.operationWarning
-                font.pixelSize: Style.fontSizeSmall
+                font.pointSize: Style.fontSizeSmall
                 font.family: Style.fontFamily
                 color: "#FFA500"  // Orange/amber for warning
                 Layout.fillWidth: true
@@ -382,9 +387,6 @@ WizardStepBase {
                 imageWriter.skipCurrentVerification()
             } else {
                 // Cancel the actual write operation
-                root.cancelPending = true
-                root.isVerifying = false
-                root.isFinalising = true
                 progressBar.value = 100
                 progressText.text = qsTr("Finalising…")
                 imageWriter.cancelWrite()
@@ -404,7 +406,6 @@ WizardStepBase {
     }
 
     function onFinalizing() {
-        root.isVerifying = false
         progressText.text = qsTr("Finalising...")
         progressBar.value = 100
     }
@@ -465,7 +466,7 @@ WizardStepBase {
         Text {
             id: warningText
             text: qsTr("You are about to ERASE all data on: %1").arg(wizardContainer.selectedStorageName || qsTr("the storage device"))
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelErrorColor
@@ -482,7 +483,7 @@ WizardStepBase {
         Text {
             id: permanentText
             text: qsTr("This action is PERMANENT and CANNOT be undone.")
-            font.pixelSize: Style.fontSizeFormLabel
+            font.pointSize: Style.fontSizeFormLabel
             font.family: Style.fontFamilyBold
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
@@ -498,7 +499,7 @@ WizardStepBase {
         Text {
             id: waitText
             text: qsTr("Please wait... %1").arg(confirmDialog.countdown)
-            font.pixelSize: Style.fontSizeFormLabel
+            font.pointSize: Style.fontSizeFormLabel
             font.family: Style.fontFamily
             color: Style.textMetadataColor
             horizontalAlignment: Text.AlignRight
@@ -567,8 +568,6 @@ WizardStepBase {
         onTriggered: {
             // Ensure our window regains focus before elevating privileges
             root.forceActiveFocus()
-            root.isWriting = true
-            wizardContainer.isWriting = true
             root.bottleneckStatus = ""
             root.writeThroughputKBps = 0
             root.operationWarning = ""
@@ -576,7 +575,7 @@ WizardStepBase {
             root.isIndeterminateProgress = !imageWriter.isExtractSizeKnown()
             progressText.text = qsTr("Starting write process...")
             progressBar.value = 0
-            Qt.callLater(function(){ imageWriter.startWrite() })
+            imageWriter.startWrite()
         }
     }
 
@@ -601,8 +600,6 @@ WizardStepBase {
 
     function onVerifyProgress(now, total) {
         if (root.isWriting) {
-            root.isVerifying = true
-            root.bottleneckStatus = ""  // Clear write bottleneck during verification
             root.operationWarning = ""  // Clear write warnings during verification
             var progress = total > 0 ? (now / total) * 100 : 0
             progressBar.value = progress
@@ -620,28 +617,17 @@ WizardStepBase {
     Connections {
         target: imageWriter
         function onSuccess() {
-            root.isWriting = false
-            wizardContainer.isWriting = false
-            root.cancelPending = false
-            root.isFinalising = false
-            root.isComplete = true
             progressText.text = qsTr("Write completed successfully!")
 
             // Automatically advance to the done screen
             wizardContainer.nextStep()
         }
         function onError(msg) {
-            root.isWriting = false
-            wizardContainer.isWriting = false
-            root.cancelPending = false
-            root.isFinalising = false
             progressText.text = qsTr("Write failed: %1").arg(msg)
         }
 
         function onFinalizing() {
-            if (root.isWriting || root.cancelPending) {
-                root.isVerifying = false
-                root.isFinalising = true
+            if (root.isWriting) {
                 progressText.text = qsTr("Finalising…")
                 progressBar.value = 100
             }

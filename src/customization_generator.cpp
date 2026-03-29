@@ -72,9 +72,10 @@ QByteArray CustomisationGenerator::generateSystemdScript(const QVariantMap& s, c
     const QString userPass = s.value("sshUserPassword").toString(); // crypted if present
     const QString sshPublicKey = s.value("sshPublicKey").toString().trimmed();
     const QString sshAuthorizedKeys = s.value("sshAuthorizedKeys").toString().trimmed();
-    const QString ssid = s.value("wifiSSID").toString();
-    const QString cryptedPskFromSettings = s.value("wifiPasswordCrypt").toString();
-    bool hidden = s.value("wifiHidden").toBool();
+    const bool wifiConfigured = s.value("wifiConfigured", true).toBool();
+    const QString ssid = wifiConfigured ? s.value("wifiSSID").toString() : QString();
+    const QString cryptedPskFromSettings = wifiConfigured ? s.value("wifiPasswordCrypt").toString() : QString();
+    bool hidden = wifiConfigured ? s.value("wifiHidden").toBool() : false;
     if (!hidden)
         hidden = s.value("wifiSSIDHidden").toBool();
     const QString wifiCountry = s.value("recommendedWifiCountry").toString().trimmed();
@@ -105,6 +106,7 @@ QByteArray CustomisationGenerator::generateSystemdScript(const QVariantMap& s, c
         pubkeyArgs += shellQuote(k);
     }
 
+    const bool passwordlessSudo = s.value("passwordlessSudo").toBool();
     const QString effectiveUser = userName.isEmpty() ? QStringLiteral("pi") : userName;
     const QString groups = QStringLiteral("users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo");
 
@@ -177,6 +179,13 @@ QByteArray CustomisationGenerator::generateSystemdScript(const QVariantMap& s, c
         line(QStringLiteral("      fi"), script);
         line(QStringLiteral("   fi"), script);
         line(QStringLiteral("fi"), script);
+    }
+
+    // Passwordless sudo configuration
+    if (passwordlessSudo && (!userName.isEmpty() || !userPass.isEmpty() || !keyList.isEmpty())) {
+        const QString sudoersFile = QStringLiteral("/etc/sudoers.d/010_") + effectiveUser + QStringLiteral("-nopasswd");
+        line(QStringLiteral("echo ") + shellQuote(effectiveUser + QStringLiteral(" ALL=(ALL) NOPASSWD:ALL")) + QStringLiteral(" >") + shellQuote(sudoersFile), script);
+        line(QStringLiteral("chmod 0440 ") + shellQuote(sudoersFile), script);
     }
 
     if (!ssid.isEmpty()) {
@@ -330,10 +339,6 @@ QByteArray CustomisationGenerator::generateCloudInitUserData(const QVariantMap& 
         }
     };
     
-    // Don't let cloud-init manage DNS - let dhcpcd/NetworkManager handle it
-    push(QStringLiteral("manage_resolv_conf: false"), cloud);
-    push(QString(), cloud);
-    
     const QString hostname = settings.value("hostname").toString().trimmed();
     if (!hostname.isEmpty()) {
         push(QStringLiteral("hostname: ") + hostname, cloud);
@@ -372,6 +377,7 @@ QByteArray CustomisationGenerator::generateCloudInitUserData(const QVariantMap& 
     const QString userPass = settings.value("sshUserPassword").toString(); // expected crypted if present
     const QString sshPublicKey = settings.value("sshPublicKey").toString().trimmed();
     const QString sshAuthorizedKeys = settings.value("sshAuthorizedKeys").toString().trimmed();
+    const bool passwordlessSudo = settings.value("passwordlessSudo").toBool();
     
     // User configuration is independent of SSH - generate users section when:
     // - A username with password is configured (local user account), OR
@@ -405,15 +411,17 @@ QByteArray CustomisationGenerator::generateCloudInitUserData(const QVariantMap& 
             if (!sshAuthorizedKeys.isEmpty()) {
                 const QStringList keys = sshAuthorizedKeys.split(QRegularExpression("\r?\n"), Qt::SkipEmptyParts);
                 for (const QString& k : keys) {
-                    push(QStringLiteral("    - ") + k.trimmed(), cloud);
+                    push(QStringLiteral("    - \"") + k.trimmed() + QStringLiteral("\""), cloud);
                 }
             } else {
                 // Split sshPublicKey by newlines to handle .pub files with multiple keys
                 const QStringList keys = sshPublicKey.split(QRegularExpression("\r?\n"), Qt::SkipEmptyParts);
                 for (const QString& k : keys) {
-                    push(QStringLiteral("    - ") + k.trimmed(), cloud);
+                    push(QStringLiteral("    - \"") + k.trimmed() + QStringLiteral("\""), cloud);
                 }
             }
+        }
+        if (passwordlessSudo) {
             push(QStringLiteral("  sudo: ALL=(ALL) NOPASSWD:ALL"), cloud);
         }
         push(QString(), cloud); // blank line
@@ -482,7 +490,8 @@ QByteArray CustomisationGenerator::generateCloudInitUserData(const QVariantMap& 
     // Raspberry Pi Connect token provisioning via cloud-init write_files (store in user's home)
     const bool piConnectEnabled = settings.value("piConnectEnabled").toBool();
     QString cleanToken = piConnectToken.trimmed();
-    const QString ssid = settings.value("wifiSSID").toString();
+    const bool wifiConfigured = settings.value("wifiConfigured", true).toBool();
+    const QString ssid = wifiConfigured ? settings.value("wifiSSID").toString() : QString();
     const QString wifiCountry = settings.value("recommendedWifiCountry").toString().trimmed();
     
     // Determine if we need runcmd section
@@ -539,6 +548,13 @@ QByteArray CustomisationGenerator::generateCloudInitUserData(const QVariantMap& 
         }
     }
     
+    // Don't let cloud-init manage DNS - let dhcpcd/NetworkManager handle it
+    // Only include this when there is actual customisation content, so that
+    // skipping customisation produces an empty payload.
+    if (!cloud.isEmpty()) {
+        cloud.prepend("manage_resolv_conf: false\n\n");
+    }
+
     return cloud;
 }
 
@@ -554,22 +570,11 @@ QByteArray CustomisationGenerator::generateCloudInitNetworkConfig(const QVariant
         }
     };
     
-    const QString ssid = settings.value("wifiSSID").toString();
-    const QString cryptedPskFromSettings = settings.value("wifiPasswordCrypt").toString();
-    const bool hidden = settings.value("wifiHidden").toBool();
+    const bool wifiConfigured = settings.value("wifiConfigured", true).toBool();
+    const QString ssid = wifiConfigured ? settings.value("wifiSSID").toString() : QString();
+    const QString cryptedPskFromSettings = wifiConfigured ? settings.value("wifiPasswordCrypt").toString() : QString();
+    const bool hidden = wifiConfigured ? settings.value("wifiHidden").toBool() : false;
     const QString regDom = settings.value("recommendedWifiCountry").toString().trimmed().toUpper();
-    
-    // Always generate network config with eth0 DHCP configuration
-    // This ensures wired ethernet works out of the box with both IPv4 and IPv6
-    push(QStringLiteral("network:"), netcfg);
-    push(QStringLiteral("  version: 2"), netcfg);
-    
-    // Configure eth0 with DHCP for both IPv4 and IPv6
-    push(QStringLiteral("  ethernets:"), netcfg);
-    push(QStringLiteral("    eth0:"), netcfg);
-    push(QStringLiteral("      dhcp4: true"), netcfg);
-    push(QStringLiteral("      dhcp6: true"), netcfg);
-    push(QStringLiteral("      optional: true"), netcfg);
     
     // Generate WiFi config if we have an SSID
     // Cloud-init requires at least one access-point if wifis: is defined, so we can't
@@ -577,6 +582,17 @@ QByteArray CustomisationGenerator::generateCloudInitNetworkConfig(const QVariant
     // the regulatory domain in the network config here. When there's no SSID, the regulatory
     // domain is set via cmdline parameter (cfg80211.ieee80211_regdom) in imagewriter.cpp
     if (!ssid.isEmpty()) {
+        // Include eth0 DHCP alongside wifi to ensure wired ethernet continues to work
+        // when cloud-init applies the network-config (which would otherwise replace the
+        // distro default). Only needed when we're providing a network-config file.
+        push(QStringLiteral("network:"), netcfg);
+        push(QStringLiteral("  version: 2"), netcfg);
+        push(QStringLiteral("  ethernets:"), netcfg);
+        push(QStringLiteral("    eth0:"), netcfg);
+        push(QStringLiteral("      dhcp4: true"), netcfg);
+        push(QStringLiteral("      dhcp6: true"), netcfg);
+        push(QStringLiteral("      optional: true"), netcfg);
+
         push(QStringLiteral("  wifis:"), netcfg);
         push(QStringLiteral("    wlan0:"), netcfg);
         push(QStringLiteral("      dhcp4: true"), netcfg);

@@ -1,5 +1,7 @@
 # Raspberry Pi Imager
 
+![](./screenshot.png)
+
 Raspberry Pi Imaging Utility
 
 - To install on Raspberry Pi OS, use `sudo apt update && sudo apt install rpi-imager`.

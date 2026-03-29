@@ -28,49 +28,34 @@ set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Which macOS architectur
 
 project(rpi-imager LANGUAGES CXX C)
 
-# Get version from git tag
 find_package(Git QUIET)
-if(GIT_FOUND)
-    execute_process(
-        COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE GIT_DESCRIBE
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-endif()
 
-# Use git-derived version as the canonical version string
-if(GIT_DESCRIBE)
-    set(IMAGER_VERSION_STR "${GIT_DESCRIBE}")
-    message(STATUS "Version from git: ${IMAGER_VERSION_STR}")
-    
-    # Extract numeric version components from git tag for Windows metadata
-    # Expected format: v2.0.0 or v2.0.0-rc4-60-geac7c2f0
-    string(REGEX MATCH "^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)" VERSION_MATCH "${GIT_DESCRIBE}")
-    if(VERSION_MATCH)
-        set(IMAGER_VERSION_MAJOR ${CMAKE_MATCH_1})
-        set(IMAGER_VERSION_MINOR ${CMAKE_MATCH_2})
-        set(IMAGER_VERSION_PATCH ${CMAKE_MATCH_3})
-    else()
-        # Fallback if tag doesn't match expected format
-        set(IMAGER_VERSION_MAJOR 0)
-        set(IMAGER_VERSION_MINOR 0)
-        set(IMAGER_VERSION_PATCH 0)
-        message(WARNING "Could not parse version from git tag: ${GIT_DESCRIBE}")
-    endif()
-else()
-    # Fallback when git is not available or no tags exist
-    set(IMAGER_VERSION_MAJOR 0)
-    set(IMAGER_VERSION_MINOR 0)
-    set(IMAGER_VERSION_PATCH 0)
-    set(IMAGER_VERSION_STR "0.0.0-unknown")
-    message(WARNING "Git not found or no tags available, using fallback version: ${IMAGER_VERSION_STR}")
-endif()
+# Build-time version: re-runs `git describe` on every build so that dirty
+# state and new commits are detected without needing to re-configure.
+# Generates:
+#   imager_version.h          — C++ header with #define IMAGER_VERSION_STR
+#   imager_version_vars.cmake — CMake include file for build-time template substitution
+set(IMAGER_VERSION_VARS "${CMAKE_CURRENT_BINARY_DIR}/imager_version_vars.cmake")
+add_custom_target(generate_version ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateVersion.cmake
+    BYPRODUCTS
+        ${CMAKE_CURRENT_BINARY_DIR}/imager_version.h
+        ${CMAKE_CURRENT_BINARY_DIR}/imager_version_vars.cmake
+    COMMENT "Checking build-time version via git describe"
+    VERBATIM
+)
 
-# Version variables for template substitution (Windows .rc, .manifest, etc.)
-# Note: IMAGER_VERSION_STR is used in C++ code, so it needs to be a compile definition
-add_definitions(-DIMAGER_VERSION_STR="${IMAGER_VERSION_STR}")
+# Path to the generic build-time template substitution script
+set(CONFIGURE_VERSIONED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ConfigureVersionedFile.cmake")
+
+# Make the generated header includable; C++ code uses:
+#   #include "imager_version.h"
+# instead of relying on a -D compile definition.
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -207,6 +192,9 @@ else()
 endif()
 
 
+# Bundled libusb (for rpiboot Compute Module support)
+include(dependencies/libusb.cmake)
+
 # Add dependencies
 if (APPLE)
     include(mac/Platform.cmake)
@@ -266,6 +254,23 @@ if(BUILD_EMBEDDED)
 else()
     set(SOURCES ${SOURCES} "device_info.cpp")
 endif()
+
+# rpiboot and fastboot sources (Compute Module imaging)
+set(SOURCES ${SOURCES}
+    "rpiboot/libusb_transport.cpp"
+    "rpiboot/bootcode_loader.cpp"
+    "rpiboot/file_server.cpp"
+    "rpiboot/bootfiles.cpp"
+    "rpiboot/rpiboot_protocol.cpp"
+    "rpiboot/firmware_manager.cpp"
+    "rpiboot/rpiboot_scanner.cpp"
+    "rpiboot/secure_boot_provisioner.cpp"
+    "rpibootthread.cpp"
+    "fastboot/fastboot_protocol.cpp"
+    "fastboot/bmap.cpp"
+    "fastboot/sparse_encoder.cpp"
+    "fastbootflashthread.cpp"
+)
 
 # Find Qt components - different requirements for CLI-only vs GUI builds
 if(BUILD_CLI_ONLY)
@@ -391,6 +396,9 @@ else()
     add_executable(${PROJECT_NAME} ${SOURCES} ${DEPENDENCIES})
 endif()
 
+# Ensure version header is generated before compiling
+add_dependencies(${PROJECT_NAME} generate_version)
+
 # Set output name based on build type
 if(BUILD_CLI_ONLY)
     set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "rpi-imager-cli")
@@ -460,9 +468,11 @@ if(NOT BUILD_CLI_ONLY)
         wizard/dialogs/ConfirmSystemDriveDialog.qml
         wizard/dialogs/KeychainPermissionDialog.qml
         wizard/dialogs/UpdateAvailableDialog.qml
+        wizard/dialogs/PasswordlessSudoWarningDialog.qml
         wizard/dialogs/RepositoryDialog.qml
         wizard/dialogs/AppOptionsDialog.qml
         wizard/dialogs/DebugOptionsDialog.qml
+        wizard/dialogs/ConfirmOtpProgramDialog.qml
         wizard/LanguageSelectionStep.qml
         qmlcomponents/BaseDialog.qml
         qmlcomponents/ImButton.qml
@@ -542,20 +552,23 @@ else()
     include(linux/PlatformPackaging.cmake)
 endif()
 
-add_dependencies(${PROJECT_NAME} zlibstatic yescrypt)
-include_directories(${CURL_INCLUDE_DIR} ${LibArchive_INCLUDE_DIR} ${LIBLZMA_INCLUDE_DIRS} ${LIBDRM_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIR} ${YESCRYPT_INCLUDE_DIR})
+add_dependencies(${PROJECT_NAME} zlibstatic yescrypt usb-1.0-static)
+include_directories(${CURL_INCLUDE_DIR} ${LibArchive_INCLUDE_DIR} ${LIBLZMA_INCLUDE_DIRS} ${LIBDRM_INCLUDE_DIRS} ${ZLIB_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIR} ${YESCRYPT_INCLUDE_DIR} ${LIBUSB_INCLUDE_DIR})
 
 # Link different Qt components based on build type
+# rpiboot link libraries (libusb)
+set(RPIBOOT_LIBS ${LIBUSB_LIBRARIES})
+
 if(BUILD_CLI_ONLY)
     # CLI-only build: link Core, Network and essential libraries
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Network ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${EXTRALIBS})
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Network ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${RPIBOOT_LIBS} ${EXTRALIBS})
 else()
     # Regular GUI build: link all GUI components
     # Add DBus on Linux for suspend inhibitor and native file dialogs (portals)
     if(UNIX AND NOT APPLE)
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Quick ${QT}::Svg ${QT}::Network ${QT}::DBus ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${EXTRALIBS})
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Quick ${QT}::Svg ${QT}::Network ${QT}::DBus ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${RPIBOOT_LIBS} ${EXTRALIBS})
     else()
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Quick ${QT}::Svg ${QT}::Network ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${EXTRALIBS})
+        target_link_libraries(${PROJECT_NAME} PRIVATE ${QT}::Core ${QT}::Gui ${QT}::Quick ${QT}::Svg ${QT}::Network ${CURL_LIBRARIES} ${LibArchive_LIBRARIES} ${ZSTD_LIBRARIES} ${LIBLZMA_LIBRARIES} ${ZLIB_LIBRARIES} ${YESCRYPT_LIBRARIES} ${LIBDRM_LIBRARIES} ${ATOMIC_LIBRARY} ${RPIBOOT_LIBS} ${EXTRALIBS})
     endif()
 endif()
 

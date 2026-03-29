@@ -60,10 +60,10 @@ namespace PlatformQuirks {
     /** Attach to or allocate a console for output (Windows-specific). */
     void attachConsole();
 
-    /** Check if running from a self-contained application bundle (e.g., AppImage). */
+    /** Check if running from a binary that could be elevated via pkexec. */
     bool isElevatableBundle();
 
-    /** Get the path to the application bundle file. */
+    /** Get the path to the current executable (AppImage path or /proc/self/exe). */
     const char* getBundlePath();
 
     /** Check if automatic privilege elevation is configured. */
@@ -86,6 +86,27 @@ namespace PlatformQuirks {
 
     /** Determine if scroll direction should be inverted for natural scrolling. */
     bool isScrollInverted(bool qtInvertedFlag);
+
+    /**
+     * Detect the platform's preferred text scaling factor.
+     *
+     * Returns a multiplier (1.0 = no scaling, 1.5 = 150%, etc.) reflecting
+     * the user's desktop text size preferences. On Linux, reads GSettings
+     * text-scaling-factor and font-name; on Windows, compares system font
+     * size to the default; on macOS, returns 1.0 (Retina handled by Qt).
+     *
+     * Must be called AFTER QGuiApplication is created.
+     */
+    qreal detectTextScaleFactor();
+
+    /**
+     * Returns a multiplier to correct font point sizes for the platform's
+     * logical DPI. Qt uses 96 DPI on Windows/Linux and 72 DPI on macOS, so
+     * the same pointSize renders ~33% more pixels on Windows/Linux.
+     * Returns 72/96 ≈ 0.75 on Windows/Linux, 1.0 on macOS.
+     * Apply only to font sizes — not to layout or spacing.
+     */
+    qreal fontDpiCorrection();
 
     /**
      * Get the optimal device path for write I/O operations.

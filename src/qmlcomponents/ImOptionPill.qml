@@ -29,7 +29,7 @@ Item {
     // Single source of truth for label font (used by both label and TextMetrics)
     readonly property font labelFont: Qt.font({
         family: Style.fontFamilyBold,
-        pixelSize: Style.fontSizeFormLabel,
+        pointSize: Style.fontSizeFormLabel,
         bold: true
     })
     
@@ -96,7 +96,7 @@ Item {
                 visible: pill.helpLabel !== "" && pill.helpUrl !== ""
                 text: pill.helpLabel
                 font.family: Style.fontFamily
-                font.pixelSize: Style.fontSizeDescription
+                font.pointSize: Style.fontSizeDescription
                 color: helpText.activeFocus ? Style.raspberryRed : Style.buttonForegroundColor
                 font.underline: helpHover.hovered || helpText.activeFocus
                 
@@ -168,6 +168,7 @@ Item {
             Material.accent: sw.activeFocus ? Style.raspberryRed : Style.formControlActiveColor
             checked: pill.checked
             activeFocusOnTab: true
+            focusPolicy: Qt.TabFocus
             
             // Access imageWriter from parent context
             property var imageWriter: {

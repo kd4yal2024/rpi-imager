@@ -261,14 +261,14 @@ WizardStepBase {
                 
                 Text {
                     text: "⚠"
-                    font.pixelSize: Style.fontSizeFormLabel
+                    font.pointSize: Style.fontSizeFormLabel
                     color: Style.formLabelColor
                     Accessible.ignored: true
                 }
                 
                 Text {
                     text: qsTr("Unable to download OS list. You can still use a local image file.")
-                    font.pixelSize: Style.fontSizeDescription
+                    font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
                     Layout.fillWidth: true
@@ -479,7 +479,7 @@ WizardStepBase {
                         
                         Text {
                             text: delegateItem.name
-                            font.pixelSize: Style.fontSizeFormLabel
+                            font.pointSize: Style.fontSizeFormLabel
                             font.family: Style.fontFamilyBold
                             font.bold: true
                             color: Style.formLabelColor
@@ -489,7 +489,7 @@ WizardStepBase {
                         
                         Text {
                             text: delegateItem.description
-                            font.pixelSize: Style.fontSizeDescription
+                            font.pointSize: Style.fontSizeDescription
                             font.family: Style.fontFamily
                             color: Style.textDescriptionColor
                             Layout.fillWidth: true
@@ -501,7 +501,7 @@ WizardStepBase {
                             Layout.fillWidth: true
                             elide: Text.ElideRight
                             color: Style.textMetadataColor
-                            font.pixelSize: Style.fontSizeSmall
+                            font.pointSize: Style.fontSizeSmall
                             font.family: Style.fontFamily
                             // Hide for custom until a file is chosen; otherwise show status
                             visible: (typeof(delegateItem.url) === "string" && delegateItem.url !== "internal://custom" && delegateItem.url !== "internal://format")
@@ -525,7 +525,7 @@ WizardStepBase {
                         
                         Text {
                             text: delegateItem.release_date !== "" ? qsTr("Released: %1").arg(delegateItem.release_date) : ""
-                            font.pixelSize: Style.fontSizeSmall
+                            font.pointSize: Style.fontSizeSmall
                             font.family: Style.fontFamily
                             color: Style.textMetadataColor
                             Layout.fillWidth: true
@@ -704,6 +704,7 @@ WizardStepBase {
                 root.wizardContainer.customizationSupported = imageWriter.imageSupportsCustomization()
                 root.wizardContainer.piConnectAvailable = false
                 root.wizardContainer.secureBootAvailable = imageWriter.isSecureBootForcedByCliFlag()
+                root.wizardContainer.passwordlessSudoAvailable = false
                 root.wizardContainer.ccRpiAvailable = false
                 root.wizardContainer.ifAndFeaturesAvailable = false
                 root.nextButtonEnabled = true
@@ -721,7 +722,8 @@ WizardStepBase {
                     categorySelected,
                     model.name,
                     typeof(model.init_format) != "undefined" ? model.init_format : "",
-                    typeof(model.release_date) != "undefined" ? model.release_date : ""
+                    typeof(model.release_date) != "undefined" ? model.release_date : "",
+                    typeof(model.bmap_url) != "undefined" ? model.bmap_url : ""
                 )
                 imageWriter.setSWCapabilitiesList(model.capabilities)
 
@@ -729,6 +731,7 @@ WizardStepBase {
                 root.wizardContainer.customizationSupported = imageWriter.imageSupportsCustomization()
                 root.wizardContainer.piConnectAvailable = imageWriter.checkSWCapability("rpi_connect")
                 root.wizardContainer.secureBootAvailable = imageWriter.checkSWCapability("secure_boot") || imageWriter.isSecureBootForcedByCliFlag()
+                root.wizardContainer.passwordlessSudoAvailable = imageWriter.checkSWCapability("passwordless_sudo")
                 root.wizardContainer.ccRpiAvailable = imageWriter.imageSupportsCcRpi()
                 
                 // Check if any interface/feature capabilities are available (requires both HW and SW support)
@@ -751,6 +754,9 @@ WizardStepBase {
                 if (!root.wizardContainer.secureBootAvailable) {
                     delete root.wizardContainer.customizationSettings.secureBootEnabled
                     root.wizardContainer.secureBootEnabled = false
+                }
+                if (!root.wizardContainer.passwordlessSudoAvailable) {
+                    delete root.wizardContainer.customizationSettings.passwordlessSudo
                 }
                 // Interface/feature settings are capability-dependent and never
                 // persisted, but older versions may have saved them.  Scrub any

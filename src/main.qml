@@ -27,10 +27,10 @@ ApplicationWindow {
     // Expose overlay root to child components for dialog parenting
     readonly property alias overlayRootItem: overlayRoot
 
-    width: imageWriter.isEmbeddedMode() ? -1 : 680
-    height: imageWriter.isEmbeddedMode() ? -1 : 450
-    minimumWidth: imageWriter.isEmbeddedMode() ? -1 : 680
-    minimumHeight: imageWriter.isEmbeddedMode() ? -1 : 420
+    width: imageWriter.isEmbeddedMode() ? -1 : Style.scaled(680)
+    height: imageWriter.isEmbeddedMode() ? -1 : Style.scaled(450)
+    minimumWidth: imageWriter.isEmbeddedMode() ? -1 : Style.scaled(680)
+    minimumHeight: imageWriter.isEmbeddedMode() ? -1 : Style.scaled(420)
 
     // Track custom repo host for title display
     property string customRepoHost: imageWriter.customRepoHost()
@@ -157,7 +157,7 @@ ApplicationWindow {
         Text {
             id: errorTitle
             text: errorDialog.titleText
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -174,7 +174,7 @@ ApplicationWindow {
             text: errorDialog.message
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             Layout.fillWidth: true
@@ -231,7 +231,7 @@ ApplicationWindow {
         Text {
             id: storageRemovedTitle
             text: qsTr("Storage device removed")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -247,7 +247,7 @@ ApplicationWindow {
             id: storageRemovedMessage
             text: qsTr("The storage device was removed while writing, so the operation was cancelled. Please reinsert the device or select a different one to continue.")
             wrapMode: Text.WordWrap
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             Layout.fillWidth: true
@@ -304,7 +304,7 @@ ApplicationWindow {
         Text {
             id: quitTitle
             text: qsTr("Are you sure you want to quit?")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -319,7 +319,7 @@ ApplicationWindow {
         Text {
             id: quitMessage
             text: qsTr("Raspberry Pi Imager is still busy. Are you sure you want to quit?")
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             wrapMode: Text.WordWrap
@@ -419,7 +419,7 @@ ApplicationWindow {
         Text {
             id: headingText
             text: qsTr("Insufficient Permissions")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelErrorColor
@@ -435,7 +435,7 @@ ApplicationWindow {
         Text {
             id: messageText
             text: permissionWarningDialog.warningMessage
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             wrapMode: Text.WordWrap
@@ -610,7 +610,6 @@ ApplicationWindow {
     // Called from C++ when a write was cancelled because the storage device was removed
     function onWriteCancelledDueToDeviceRemoval() {
         if (wizardContainer) {
-            wizardContainer.isWriting = false;
             wizardContainer.selectedStorageName = "";
         }
         // Clear backend dst reference

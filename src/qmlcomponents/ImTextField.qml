@@ -12,9 +12,13 @@ pragma ComponentBehavior: Bound
 TextField {
     id: root
 
+    font.family: Style.fontFamily
+    font.pointSize: Style.fontSizeInput
+
     // Sensible defaults to ensure consistent behavior across the app
     activeFocusOnPress: true
     activeFocusOnTab: true
+    focusPolicy: Qt.TabFocus
     selectByMouse: true
     persistentSelection: true
     cursorVisible: activeFocus

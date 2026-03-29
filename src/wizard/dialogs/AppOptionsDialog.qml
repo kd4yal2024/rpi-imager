@@ -71,7 +71,7 @@ BaseDialog {
     Text {
         id: headerText
         text: qsTr("App Options")
-        font.pixelSize: Style.fontSizeLargeHeading
+        font.pointSize: Style.fontSizeLargeHeading
         font.family: Style.fontFamilyBold
         font.bold: true
         color: Style.formLabelColor
@@ -245,7 +245,7 @@ BaseDialog {
     Text {
         id: versionText
         text: qsTr("Version: %1").arg(imageWriter.constantVersion())
-        font.pixelSize: Style.fontSizeCaption
+        font.pointSize: Style.fontSizeCaption
         font.family: Style.fontFamily
         color: Style.textDescriptionColor
         Layout.fillWidth: true
@@ -340,28 +340,30 @@ BaseDialog {
     }
 
     function initialize() {
-        if (!initialized) {
-            // Set flag to prevent onCheckedChanged handlers from triggering dialogs
-            isInitializing = true;
-            
-            // Load current settings from ImageWriter
-            // Only enable beep if it's both saved as enabled AND available on this system
-            chkBeep.checked = imageWriter.getBoolSetting("beep") && imageWriter.isBeepAvailable();
-            chkEject.checked = imageWriter.getBoolSetting("eject");
-            chkTelemetry.checked = imageWriter.getBoolSetting("telemetry");
-            // Do not load from QSettings; keep ephemeral
-            chkDisableWarnings.checked = popup.wizardContainer ? popup.wizardContainer.disableWarnings : false;
-            // Load secure boot RSA key path
-            var keyPath = imageWriter.getStringSetting("secureboot_rsa_key");
-            if (keyPath) {
-                rsaKeyPath.text = keyPath;
-            }
+        var firstOpen = !initialized;
 
-            initialized = true;
-            // Clear initialization flag
-            isInitializing = false;
-            
-            // Pre-compute final height before opening to avoid first-show reflow
+        // Set flag to prevent onCheckedChanged handlers from triggering dialogs
+        isInitializing = true;
+
+        // (Re)load current settings from ImageWriter so that Cancel discards changes
+        // Only enable beep if it's both saved as enabled AND available on this system
+        chkBeep.checked = imageWriter.getBoolSetting("beep") && imageWriter.isBeepAvailable();
+        chkEject.checked = imageWriter.getBoolSetting("eject");
+        chkTelemetry.checked = imageWriter.getBoolSetting("telemetry");
+        // Do not load from QSettings; keep ephemeral
+        chkDisableWarnings.checked = popup.wizardContainer ? popup.wizardContainer.disableWarnings : false;
+        // Load secure boot RSA key path
+        var keyPath = imageWriter.getStringSetting("secureboot_rsa_key");
+        if (keyPath) {
+            rsaKeyPath.text = keyPath;
+        }
+
+        initialized = true;
+        // Clear initialization flag
+        isInitializing = false;
+
+        // Pre-compute final height before opening to avoid first-show reflow
+        if (firstOpen) {
             var desired = contentLayout ? (contentLayout.implicitHeight + Style.cardPadding * 2) : 280;
             popup.height = Math.max(280, desired);
         }
@@ -424,7 +426,7 @@ BaseDialog {
         Text {
             id: confirmTitleText
             text: qsTr("Disable warnings?")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -440,7 +442,7 @@ BaseDialog {
             id: confirmDescriptionText
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             Layout.fillWidth: true
@@ -512,7 +514,7 @@ BaseDialog {
         Text {
             id: clearSettingsTitleText
             text: qsTr("Clear saved customisation?")
-            font.pixelSize: Style.fontSizeHeading
+            font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelColor
@@ -528,7 +530,7 @@ BaseDialog {
             id: clearSettingsDescriptionText
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
-            font.pixelSize: Style.fontSizeDescription
+            font.pointSize: Style.fontSizeDescription
             font.family: Style.fontFamily
             color: Style.textDescriptionColor
             Layout.fillWidth: true

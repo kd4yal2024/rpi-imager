@@ -43,6 +43,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QCryptographicHash>
+#include <filesystem>
 #include <QUuid>
 #include <vector>
 #include <string>
@@ -157,6 +158,26 @@ namespace {
         }
         
         return nullptr;
+    }
+
+    // Grant root access to the user's X11 display via xhost.
+    // Must be run as the original (non-root) user who owns the display session,
+    // since root doesn't yet have permission to connect.
+    // Uses +SI:localuser:root (server-interpreted, narrowly scoped to root only).
+    void grantRootDisplayAccess(uid_t uid, gid_t gid) {
+        pid_t pid = fork();
+        if (pid < 0) return;
+
+        if (pid == 0) {
+            // POSIX: only async-signal-safe functions between fork() and exec()
+            if (setgid(gid) != 0) _exit(1);
+            if (setuid(uid) != 0) _exit(1);
+            execlp("xhost", "xhost", "+SI:localuser:root", nullptr);
+            _exit(127);
+        }
+
+        int status;
+        waitpid(pid, &status, 0);
     }
 }
 
@@ -279,14 +300,22 @@ void applyQuirks() {
                         std::fprintf(stderr, "Detected X11 display socket, set DISPLAY to: :0\n");
                     }
                     
-                    // Check for Wayland socket in the user's XDG_RUNTIME_DIR
-                    char waylandSocketPath[512];
-                    std::snprintf(waylandSocketPath, sizeof(waylandSocketPath), 
-                                 "%s/wayland-0", xdgRuntimeDir);
-                    if (access(waylandSocketPath, F_OK) == 0) {
-                        ::setenv("WAYLAND_DISPLAY", "wayland-0", 1);
-                        std::fprintf(stderr, "Detected Wayland socket, set WAYLAND_DISPLAY to: wayland-0\n");
-                    }
+                    // Scan XDG_RUNTIME_DIR for a Wayland compositor socket
+                    // Sway, nested compositors, and multi-seat setups may use
+                    // wayland-1 or higher, not just wayland-0
+                    namespace fs = std::filesystem;
+                    try {
+                        for (const auto& entry : fs::directory_iterator(xdgRuntimeDir)) {
+                            auto name = entry.path().filename().string();
+                            if (name.starts_with("wayland-") && !name.ends_with(".lock") &&
+                                entry.is_socket()) {
+                                ::setenv("WAYLAND_DISPLAY", name.c_str(), 1);
+                                std::fprintf(stderr, "Detected Wayland socket, set WAYLAND_DISPLAY to: %s\n",
+                                            name.c_str());
+                                break;
+                            }
+                        }
+                    } catch (const fs::filesystem_error&) {}
                 } else {
                     // Display variables already set, just log them
                     if (currentDisplay) {
@@ -311,6 +340,13 @@ void applyQuirks() {
                     }
                 } else {
                     std::fprintf(stderr, "XAUTHORITY already set to: %s\n", currentXauthority);
+                }
+                
+                // If an X11 display is available, grant root access via xhost.
+                // This runs as the original user (who owns the display session)
+                // and must happen after DISPLAY and XAUTHORITY are configured.
+                if (::getenv("DISPLAY")) {
+                    grantRootDisplayAccess(originalUid, pwResult->pw_gid);
                 }
                 
                 std::fprintf(stderr, "Set HOME to: %s\n", pwResult->pw_dir);
@@ -728,8 +764,28 @@ void attachConsole() {
 }
 
 const char* getBundlePath() {
-    // APPIMAGE is set by the AppImage runtime before our code runs
-    return ::getenv("APPIMAGE");
+    // Prefer $APPIMAGE (set by AppImage runtime) so that pkexec re-launches
+    // the AppImage wrapper rather than the unpacked binary inside it.
+    const char* appimage = ::getenv("APPIMAGE");
+    if (appimage)
+        return appimage;
+
+    // Fallback: resolve our own executable path. This covers native (non-AppImage)
+    // installs so that self-elevation via tryElevate() works for any packaging.
+    // Not cached: /proc/self/exe can change to "(deleted)" after a package upgrade,
+    // and we'd rather return null than a stale path.
+    static thread_local char resolved[PATH_MAX];
+    ssize_t len = ::readlink("/proc/self/exe", resolved, sizeof(resolved) - 1);
+    if (len <= 0)
+        return nullptr;
+    resolved[len] = '\0';
+
+    // After a package upgrade, the kernel appends " (deleted)" to the target.
+    // Treat that as unavailable rather than passing a bogus path to pkexec.
+    if (strstr(resolved, " (deleted)"))
+        return nullptr;
+
+    return resolved;
 }
 
 bool isElevatableBundle() {
@@ -792,39 +848,39 @@ static const char* const POLKIT_ACTIONS_DIRS[] = {
     nullptr
 };
 
-// Internal helper to check if policy exists for a specific path
-static bool hasPolkitPolicyForPath(const char* appImagePath) {
-    if (!appImagePath) {
+// Internal helper to check if a polkit policy exists that authorizes pkexec
+// to run the given binary path. Scans all .policy files in the standard polkit
+// action directories for a matching exec.path annotation.
+static bool hasPolkitPolicyForPath(const char* binaryPath) {
+    if (!binaryPath) {
         return false;
     }
 
-    char policyFilename[256];
-    if (!generatePolkitPolicyFilename(appImagePath, policyFilename, sizeof(policyFilename))) {
-        return false;
-    }
+    // Build the search string: the exec.path annotation matching our binary
+    QString escapedPath = xmlEscape(QString::fromUtf8(binaryPath));
+    QByteArray searchString = QString("org.freedesktop.policykit.exec.path\">%1</annotate>")
+        .arg(escapedPath).toUtf8();
 
-    // Check if the policy contains the exact AppImage path (XML-escaped form)
-    // Since we now XML-escape the path when writing, we must search for the escaped form
-    QString escapedPath = xmlEscape(QString::fromUtf8(appImagePath));
-    QString searchPath = QString("org.freedesktop.policykit.exec.path\">%1</annotate>")
-        .arg(escapedPath);
-
-    // Search both polkit directories for the policy file
-    char policyPath[512];
     for (int i = 0; POLKIT_ACTIONS_DIRS[i]; i++) {
-        std::snprintf(policyPath, sizeof(policyPath),
-            "%s/%s", POLKIT_ACTIONS_DIRS[i], policyFilename);
-
-        QFile policyFile(policyPath);
-        if (!policyFile.open(QIODevice::ReadOnly))
+        QDir dir(POLKIT_ACTIONS_DIRS[i]);
+        if (!dir.exists())
             continue;
 
-        QByteArray content = policyFile.readAll();
-        policyFile.close();
+        const QStringList policyFiles = dir.entryList(
+            QStringList() << QStringLiteral("*.policy"), QDir::Files);
+        for (const QString& filename : policyFiles) {
+            QFile policyFile(dir.filePath(filename));
+            if (!policyFile.open(QIODevice::ReadOnly))
+                continue;
 
-        if (content.contains(searchPath.toUtf8()))
-            return true;
+            QByteArray content = policyFile.readAll();
+            policyFile.close();
+
+            if (content.contains(searchString))
+                return true;
+        }
     }
+
     return false;
 }
 
@@ -834,6 +890,61 @@ bool hasElevationPolicyInstalled() {
         return false;
     }
     return hasPolkitPolicyForPath(bundlePath);
+}
+
+// Internal helper to remove stale polkit policy files left behind when the
+// AppImage was moved, renamed, or deleted. Called during policy installation
+// (which runs as root) so we have write access to the polkit directories.
+// Only touches files matching our naming convention (com.raspberrypi.rpi-imager.appimage-*.policy).
+static void cleanupStalePolkitPolicies(const char* currentPath) {
+    const QByteArray execPathTag("org.freedesktop.policykit.exec.path\">");
+    const QByteArray closeTag("</annotate>");
+
+    for (int i = 0; POLKIT_ACTIONS_DIRS[i]; i++) {
+        QDir dir(POLKIT_ACTIONS_DIRS[i]);
+        if (!dir.exists())
+            continue;
+
+        const QStringList policyFiles = dir.entryList(
+            QStringList() << QStringLiteral("com.raspberrypi.rpi-imager.appimage-*.policy"),
+            QDir::Files);
+
+        for (const QString& filename : policyFiles) {
+            QString fullPath = dir.filePath(filename);
+            QFile file(fullPath);
+            if (!file.open(QIODevice::ReadOnly))
+                continue;
+
+            QByteArray content = file.readAll();
+            file.close();
+
+            // Extract the exec.path value from the policy XML
+            int tagStart = content.indexOf(execPathTag);
+            if (tagStart < 0)
+                continue;
+            tagStart += execPathTag.size();
+            int tagEnd = content.indexOf(closeTag, tagStart);
+            if (tagEnd < 0)
+                continue;
+
+            QByteArray referencedPath = content.mid(tagStart, tagEnd - tagStart).trimmed();
+            if (referencedPath.isEmpty())
+                continue;
+
+            // Keep the policy if it references the current AppImage path
+            if (currentPath && referencedPath == currentPath)
+                continue;
+
+            // Remove if the referenced binary no longer exists
+            struct stat st;
+            if (stat(referencedPath.constData(), &st) != 0) {
+                if (QFile::remove(fullPath)) {
+                    std::fprintf(stderr, "Removed stale polkit policy: %s (target %s no longer exists)\n",
+                                 qPrintable(fullPath), referencedPath.constData());
+                }
+            }
+        }
+    }
 }
 
 // Internal helper to install polkit policy for a specific path
@@ -859,7 +970,10 @@ static bool installPolkitPolicyForPath(const char* appImagePath) {
                      static_cast<int>(strlen(appImagePath)), appImagePath);
         return false;
     }
-    
+
+    // Clean up stale policy files from previous AppImage locations before installing the new one
+    cleanupStalePolkitPolicies(appImagePath);
+
     char policyFilename[256];
     if (!generatePolkitPolicyFilename(appImagePath, policyFilename, sizeof(policyFilename))) {
         return false;
@@ -1030,23 +1144,26 @@ bool launchDetached(const QString& program, const QStringList& arguments) {
 }
 
 bool tryElevate(int argc, char** argv) {
-    // Only attempt elevation if running from AppImage, not root, and have policy
-    const char* appImagePath = getBundlePath();
-    if (!appImagePath || ::geteuid() == 0) {
+    // Only attempt elevation if not already root, have a bundle path, and have a polkit policy
+    const char* bundlePath = getBundlePath();
+    if (!bundlePath || ::geteuid() == 0) {
         return false;
     }
-    
-    if (access("/usr/bin/pkexec", X_OK) != 0 || !hasPolkitPolicyForPath(appImagePath)) {
+
+    if (access("/usr/bin/pkexec", X_OK) != 0 || !hasPolkitPolicyForPath(bundlePath)) {
         return false;
     }
-    
-    // Build argument list: pkexec --disable-internal-agent /path/to/appimage [args...]
+
+    // --disable-internal-agent prevents pkexec from spawning its own polkit agent.
+    // We rely on the desktop environment's agent (e.g., gnome-shell, kde-polkit)
+    // to show the auth dialog. Without this flag, pkexec's built-in text-mode agent
+    // can interfere with the GUI agent, causing duplicate prompts or hangs.
     char** newArgv = new char*[argc + 3];
     int newArgc = 0;
-    
+
     newArgv[newArgc++] = strdup("/usr/bin/pkexec");
     newArgv[newArgc++] = strdup("--disable-internal-agent");
-    newArgv[newArgc++] = strdup(appImagePath);
+    newArgv[newArgc++] = strdup(bundlePath);
     
     for (int i = 1; i < argc; i++) {
         newArgv[newArgc++] = strdup(argv[i]);
@@ -1350,6 +1467,76 @@ void clearAppImageEnvironment() {
     // our bundled libraries.
     unsetenv("LD_LIBRARY_PATH");
     unsetenv("LD_PRELOAD");
+}
+
+qreal detectTextScaleFactor()
+{
+    // If QT_SCALE_FACTOR is already set (embedded mode), don't add text scaling
+    // on top — the whole UI is already scaled uniformly by the launcher script.
+    if (!qgetenv("QT_SCALE_FACTOR").isEmpty()) {
+        return 1.0;
+    }
+
+    // Strategy 1: GSettings text-scaling-factor (GNOME/GTK accessibility scaling)
+    {
+        QProcess gsettings;
+        gsettings.start("gsettings", {"get", "org.gnome.desktop.interface", "text-scaling-factor"});
+        if (gsettings.waitForFinished(500)) {
+            bool ok = false;
+            qreal factor = gsettings.readAllStandardOutput().trimmed().toDouble(&ok);
+            if (ok && factor >= 0.5 && factor <= 3.0 && qAbs(factor - 1.0) > 0.05) {
+                qDebug() << "Text scale factor from GSettings text-scaling-factor:" << factor;
+                return factor;
+            }
+        }
+    }
+
+    // Strategy 2: GSettings font-name — parse size from "FontFamily Size" format
+    // e.g., "PibotoLt 14" → 14pt. Compare to 10pt baseline.
+    {
+        QProcess gsettings;
+        gsettings.start("gsettings", {"get", "org.gnome.desktop.interface", "font-name"});
+        if (gsettings.waitForFinished(500)) {
+            QString output = gsettings.readAllStandardOutput().trimmed();
+            // GSettings returns values in single quotes: 'PibotoLt 14'
+            output.remove('\'');
+            // The font size is the last whitespace-delimited token
+            int lastSpace = output.lastIndexOf(' ');
+            if (lastSpace > 0) {
+                bool ok = false;
+                qreal fontSize = output.mid(lastSpace + 1).toDouble(&ok);
+                if (ok && fontSize > 0) {
+                    const qreal baseline = 10.0;
+                    qreal factor = fontSize / baseline;
+                    if (factor >= 0.5 && factor <= 3.0 && qAbs(factor - 1.0) > 0.05) {
+                        qDebug() << "Text scale factor from GSettings font-name:" << factor
+                                 << "(font:" << output << ")";
+                        return factor;
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 3: GDK_DPI_SCALE environment variable
+    {
+        QByteArray gdkDpiScale = qgetenv("GDK_DPI_SCALE");
+        if (!gdkDpiScale.isEmpty()) {
+            bool ok = false;
+            qreal factor = gdkDpiScale.toDouble(&ok);
+            if (ok && factor >= 0.5 && factor <= 3.0) {
+                qDebug() << "Text scale factor from GDK_DPI_SCALE:" << factor;
+                return factor;
+            }
+        }
+    }
+
+    return 1.0;
+}
+
+qreal fontDpiCorrection()
+{
+    return 72.0 / 96.0;
 }
 
 } // namespace PlatformQuirks
