@@ -1052,7 +1052,6 @@ void ImageWriter::onRpibootFastbootReady(const QString &fastbootId)
         _rpibootThread = nullptr;
     }
 
-<<<<<<< HEAD
     // Resolve cache before starting the flash thread.  The regular
     // (non-fastboot) write path at startWrite() does this — if a cached
     // image exists and has been background-verified, it substitutes a
@@ -1292,7 +1291,7 @@ void ImageWriter::startWrite()
         emit preparationStatusUpdate(tr("Starting fastboot flash..."));
         _fastbootFlashThread = new FastbootFlashThread(
             _fastbootId, _fastbootBlockDevice, _src, _downloadLen, _extrLen, _expectedHash, this);
-        _fastbootFlashThread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _initFormat);
+        _fastbootFlashThread->setImageCustomisation(_config, _cmdline, _firstrun, _cloudinit, _cloudinitNetwork, _cloudinitMetaData, _initFormat);
         if (!_bmapUrl.isEmpty())
             _fastbootFlashThread->setBmapUrl(QUrl(_bmapUrl));
         // Same Connect-org wire-up as the rpiboot path: when the user
