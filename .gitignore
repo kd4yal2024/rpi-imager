@@ -35,6 +35,11 @@ debian/com.raspberrypi.rpi-imager.metainfo.xml
 AppDir-*
 appimage-*
 
+# Embedded .deb build tree (created by create-embedded.sh)
+debroot-embedded-*
+rpi-imager-embedded*.deb
+screenshot.png
+
 # Qt related
 qt-build**
 qt-src**
@@ -50,3 +55,11 @@ test-cli-**
 
 # clangd related
 .cache/clangd
+
+# Python tooling
+.venv
+**/.venv
+
+# Local test-signing certificates (never commit private keys)
+*.pfx
+*.cer

@@ -6,7 +6,6 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import "../../qmlcomponents"
 import RpiImager
@@ -33,7 +32,7 @@ BaseDialog {
     // Register focus groups when component is ready
     Component.onCompleted: {
         registerFocusGroup("content", function(){
-            if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+            if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                 return [titleText, warningText, detailText]
             }
             return []
@@ -44,7 +43,7 @@ BaseDialog {
     }
 
     // Dialog content
-    Text {
+    FocusableHeading {
         id: titleText
         text: qsTr("Passwordless Sudo")
         font.pointSize: Style.fontSizeHeading
@@ -52,39 +51,24 @@ BaseDialog {
         font.bold: true
         color: Style.formLabelErrorColor
         Layout.fillWidth: true
-        Accessible.role: Accessible.Heading
-        Accessible.name: text
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
-    Text {
+    FocusableText {
         id: warningText
         text: qsTr("Enabling passwordless sudo allows any process running as this user to gain full root privileges without authentication. This significantly weakens the security of your system.")
         wrapMode: Text.WordWrap
         color: Style.textDescriptionColor
         font.pointSize: Style.fontSizeDescription
         Layout.fillWidth: true
-        Accessible.role: Accessible.StaticText
-        Accessible.name: text
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
-    Text {
+    FocusableText {
         id: detailText
         text: qsTr("Only enable this if you understand the risks and have a specific need, such as automated scripts or headless operation.")
         wrapMode: Text.WordWrap
         color: Style.textMetadataColor
         font.pointSize: Style.fontSizeSmall
         Layout.fillWidth: true
-        Accessible.role: Accessible.StaticText
-        Accessible.name: text
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
     RowLayout {

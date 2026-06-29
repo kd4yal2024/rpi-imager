@@ -3,8 +3,9 @@
  * Copyright (C) 2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import "../../qmlcomponents"
 import RpiImager
@@ -27,7 +28,7 @@ BaseDialog {
     Component.onCompleted: {
         registerFocusGroup("content", function(){ 
             // Only include text elements when screen reader is active (otherwise they're not focusable)
-            if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+            if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                 return [titleText, descriptionText]
             }
             return []
@@ -38,7 +39,7 @@ BaseDialog {
     }
 
     // Dialog content
-    Text {
+    FocusableHeading {
         id: titleText
         text: qsTr("Update available")
         font.pointSize: Style.fontSizeHeading
@@ -46,14 +47,9 @@ BaseDialog {
         font.bold: true
         color: Style.formLabelColor
         Layout.fillWidth: true
-        Accessible.role: Accessible.Heading
-        Accessible.name: text
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
-    Text {
+    FocusableText {
         id: descriptionText
         text: root.version.length > 0
             ? qsTr("Imager version %1 is available. Would you like to visit the website to download it?").arg(root.version)
@@ -63,11 +59,6 @@ BaseDialog {
         font.family: Style.fontFamily
         color: Style.textDescriptionColor
         Layout.fillWidth: true
-        Accessible.role: Accessible.StaticText
-        Accessible.name: text
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
     RowLayout {
@@ -96,8 +87,8 @@ BaseDialog {
             activeFocusOnTab: true
             onClicked: {
                 if (root.url && root.url.toString && root.url.toString().length > 0) {
-                    if (root.imageWriter) {
-                        root.imageWriter.openUrl(root.url)
+                    if (ImageWriterSingleton) {
+                        ImageWriterSingleton.openUrl(root.url)
                     } else {
                         Qt.openUrlExternally(root.url)
                     }

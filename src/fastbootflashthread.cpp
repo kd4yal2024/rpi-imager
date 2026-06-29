@@ -8,6 +8,9 @@
 #include "fastboot/fastboot_protocol.h"
 #include "fastboot/sparse_encoder.h"
 #include "fastboot/bmap.h"
+#include "fastboot/pieeprom.h"
+#include "fastboot/eeprom_signer.h"
+#include "connect_device_registrar.h"
 #include "curlnetworkconfig.h"
 #include "acceleratedcryptographichash.h"
 #include "ringbuffer.h"
@@ -16,6 +19,10 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QScopeGuard>
+#include <QSettings>
+#include <QString>
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -32,6 +39,7 @@ using rpiboot::FASTBOOT_PID;
 static constexpr uint32_t DEFAULT_MAX_DOWNLOAD_SIZE = 256 * 1024 * 1024;  // 256 MB
 
 FastbootFlashThread::FastbootFlashThread(const QString& fastbootId,
+                                           const QString& blockDevice,
                                            const QUrl& imageUrl,
                                            quint64 downloadLen,
                                            quint64 extractLen,
@@ -39,6 +47,7 @@ FastbootFlashThread::FastbootFlashThread(const QString& fastbootId,
                                            QObject* parent)
     : QThread(parent)
     , _fastbootId(fastbootId)
+    , _blockDevice(blockDevice)
     , _imageUrl(imageUrl)
     , _downloadLen(downloadLen)
     , _extractLen(extractLen)
@@ -89,6 +98,167 @@ void FastbootFlashThread::setImageCustomisation(const QByteArray &config,
     _initFormat = initFormat;
 }
 
+void FastbootFlashThread::setConnectRegistration(const QString &apiKey,
+                                                   const QString &descriptionPrefix)
+{
+    _connectApiKey = apiKey;
+    _connectDescriptionPrefix = descriptionPrefix;
+}
+
+namespace {
+
+// Map a target block-device path (as seen on the device while in
+// fastboot mode) to the BOOT_ORDER nibble the bootloader uses for
+// that storage class. Returns nullopt for paths we don't recognise
+// (so the caller skips the EEPROM tweak rather than guessing).
+std::optional<fastboot::pieeprom::BootSource>
+blockDeviceToBootSource(const QString& blockDevice)
+{
+    using BS = fastboot::pieeprom::BootSource;
+    // Compare against the last path component to ignore any leading
+    // /dev/ prefix.
+    QString name = blockDevice;
+    int slash = name.lastIndexOf('/');
+    if (slash >= 0) name = name.mid(slash + 1);
+
+    if (name.startsWith("nvme",    Qt::CaseInsensitive)) return BS::Nvme;
+    if (name.startsWith("sd",       Qt::CaseInsensitive)) return BS::UsbMsd;
+    if (name.startsWith("mmcblk",   Qt::CaseInsensitive)) return BS::SdCard;
+    return std::nullopt;
+}
+
+} // namespace
+
+void FastbootFlashThread::applyBootOrderUpdate(fastboot::FastbootProtocol& fb,
+                                                rpiboot::IUsbTransport& transport)
+{
+    // Decide which BOOT_ORDER nibble corresponds to the chosen target.
+    auto sourceOpt = blockDeviceToBootSource(_blockDevice);
+    if (!sourceOpt) {
+        qDebug() << "EEPROM: skipping BOOT_ORDER update --- unrecognised target"
+                 << _blockDevice;
+        return;
+    }
+    const auto chosen = *sourceOpt;
+
+    // Probe for EEPROM support on the device. Older rpi-fastbootd builds
+    // don't expose these vars; treat absence as "no EEPROM update path".
+    auto spidevVar = fb.getVar(transport, "eeprom-device");
+    if (!spidevVar || *spidevVar == "not available") {
+        qDebug() << "EEPROM: skipping BOOT_ORDER update --- device reports no SPI EEPROM"
+                 << "(eeprom-device=" << (spidevVar ? QString::fromStdString(*spidevVar) : QStringLiteral("<missing>")) << ")";
+        return;
+    }
+    const std::string spidev = *spidevVar;
+
+    auto signedVar = fb.getVar(transport, "signed-eeprom");
+    const bool isSigned = signedVar && *signedVar == "yes";
+
+    // Pull the current image off the device so we edit the EXISTING
+    // EEPROM (preserves the device's existing signed boot configuration,
+    // bootcode, keys, etc. --- we only flip BOOT_ORDER).
+    qDebug() << "EEPROM: reading current image from" << QString::fromStdString(spidev);
+    auto image = fb.readEeprom(transport, spidev, nullptr, _cancelled);
+    if (image.empty()) {
+        qWarning() << "EEPROM: oem eeprom-read failed:"
+                   << QString::fromStdString(fb.lastError())
+                   << "--- leaving BOOT_ORDER unchanged";
+        return;
+    }
+
+    fastboot::pieeprom::Image pe(std::move(image));
+    if (auto err = pe.parse(); !err.empty()) {
+        qWarning() << "EEPROM: failed to parse pieeprom from device:"
+                   << QString::fromStdString(err)
+                   << "--- leaving BOOT_ORDER unchanged";
+        return;
+    }
+
+    auto bootconf = pe.readBootConfText();
+    if (!bootconf) {
+        qWarning() << "EEPROM: no bootconf.txt section in device image"
+                   << "--- leaving BOOT_ORDER unchanged";
+        return;
+    }
+
+    const uint32_t currentOrder = fastboot::pieeprom::parseBootOrder(*bootconf).value_or(0u);
+    const uint32_t newOrder     = fastboot::pieeprom::composeBootOrder(currentOrder, chosen);
+    if (newOrder == currentOrder) {
+        qDebug() << "EEPROM: BOOT_ORDER already 0x" << QString::number(currentOrder, 16)
+                 << "with"
+                 << QString::fromLatin1(fastboot::pieeprom::bootSourceName(chosen).data(),
+                                        static_cast<int>(fastboot::pieeprom::bootSourceName(chosen).size()))
+                 << "first --- no update needed";
+        return;
+    }
+    qDebug() << "EEPROM: BOOT_ORDER 0x" << QString::number(currentOrder, 16)
+             << "->  0x" << QString::number(newOrder, 16)
+             << "(chosen target:"
+             << QString::fromLatin1(fastboot::pieeprom::bootSourceName(chosen).data(),
+                                    static_cast<int>(fastboot::pieeprom::bootSourceName(chosen).size()))
+             << ")";
+
+    const std::string newBootconf = fastboot::pieeprom::setBootOrderLine(*bootconf, newOrder);
+    if (auto err = pe.writeBootConfText(newBootconf); !err.empty()) {
+        qWarning() << "EEPROM: failed to write new bootconf.txt:"
+                   << QString::fromStdString(err);
+        return;
+    }
+
+    // Signed-EEPROM boards refuse to boot if bootconf.sig doesn't match
+    // bootconf.txt. Re-sign with the same customer key the imager
+    // already uses for secure-boot bootcode. If no key is configured,
+    // bail out rather than write an unverifiable image.
+    if (isSigned) {
+        QSettings settings;
+        const QString keyPath = settings.value("secureboot_rsa_key").toString();
+        if (keyPath.isEmpty() || !QFile::exists(keyPath)) {
+            qWarning() << "EEPROM: signed-eeprom=yes but no usable secureboot_rsa_key in settings"
+                       << "--- aborting BOOT_ORDER update to avoid bricking the device";
+            return;
+        }
+
+        std::span<const uint8_t> bcSpan(
+            reinterpret_cast<const uint8_t*>(newBootconf.data()),
+            newBootconf.size());
+        fastboot::EepromSignerConfig sigCfg;
+        sigCfg.pemKeyPath = keyPath.toStdString();
+        // Stamp the sig with the current build time so the device's
+        // anti-rollback (if enabled) accepts the update.
+        sigCfg.sourceDateEpoch = QDateTime::currentSecsSinceEpoch();
+        auto sigRes = fastboot::buildEepromSig(bcSpan, sigCfg);
+        if (!sigRes.ok) {
+            qWarning() << "EEPROM: failed to sign bootconf.txt:"
+                       << QString::fromStdString(sigRes.error)
+                       << "--- aborting BOOT_ORDER update";
+            return;
+        }
+        if (auto err = pe.writeBootConfSig(sigRes.sigBytes); !err.empty()) {
+            qWarning() << "EEPROM: failed to embed bootconf.sig:"
+                       << QString::fromStdString(err);
+            return;
+        }
+        qDebug() << "EEPROM: re-signed bootconf.sig (" << sigRes.sigBytes.size() << "bytes)";
+    }
+
+    // Write back and verify. Both operations can take several seconds
+    // on a real SPI flash.
+    qDebug() << "EEPROM: writing updated image (" << pe.bytes().size() << "bytes)";
+    if (!fb.updateEeprom(transport, std::span<const uint8_t>(pe.bytes()),
+                          spidev, nullptr, _cancelled)) {
+        qWarning() << "EEPROM: oem eeprom-update failed:"
+                   << QString::fromStdString(fb.lastError());
+        return;
+    }
+    if (!fb.verifyEeprom(transport, std::span<const uint8_t>(pe.bytes()),
+                          spidev, nullptr, _cancelled)) {
+        qWarning() << "EEPROM: oem eeprom-verify failed:"
+                   << QString::fromStdString(fb.lastError());
+        return;
+    }
+    qDebug() << "EEPROM: BOOT_ORDER update committed";
+}
+
 bool FastbootFlashThread::applyCustomisation(fastboot::FastbootProtocol& fb,
                                               rpiboot::IUsbTransport& transport)
 {
@@ -104,7 +274,27 @@ bool FastbootFlashThread::applyCustomisation(fastboot::FastbootProtocol& fb,
              << "cmdline=" << _cmdline.size() << "bytes"
              << "cloudinit=" << _cloudinit.size() << "bytes";
 
-    static const std::string BOOT = "/boot/firmware/";
+    // Mount the boot partition on the device so file I/O commands can
+    // reach the filesystem we just flashed.
+    static const std::string MOUNTPOINT = "/mnt/bootfs";
+    std::string bootPartition = _blockDevice.toStdString() + "p1";
+
+    if (!fb.mountDevice(transport, bootPartition, MOUNTPOINT, "vfat")) {
+        emit error(tr("Failed to mount boot partition: %1")
+                   .arg(QString::fromStdString(fb.lastError())));
+        return false;
+    }
+
+    // All file paths are relative to the mountpoint
+    static const std::string BOOT = MOUNTPOINT + "/";
+
+    // Ensure umount happens even on early return
+    auto umountGuard = qScopeGuard([&] {
+        if (!fb.umountDevice(transport, MOUNTPOINT)) {
+            qWarning() << "applyCustomisation: umount failed:"
+                       << QString::fromStdString(fb.lastError());
+        }
+    });
 
     // Helper: QByteArray → span
     auto toSpan = [](const QByteArray& ba) {
@@ -630,7 +820,7 @@ void FastbootFlashThread::runImpl()
         }
 
         qDebug() << "FastbootFlashThread: flashing segment" << segmentIndex;
-        if (!fb.flash(*transport, "mmcblk0", 120000)) {
+        if (!fb.flash(*transport, _blockDevice.toStdString(), 120000)) {
             qDebug() << "FastbootFlashThread: flash FAILED for segment"
                      << segmentIndex << ":" << QString::fromStdString(fb.lastError());
             if (!_cancelled.load())
@@ -775,7 +965,42 @@ void FastbootFlashThread::runImpl()
     }
     qDebug() << "FastbootFlashThread: customisation OK";
 
-    // 10. Finalize
+    // 10. Register device identity with Raspberry Pi Connect (optional,
+    //     non-fatal).  Must happen while the device is still in fastboot
+    //     mode so we can query its public key and ask it to sign the
+    //     request via the firmware crypto engine.
+    if (!_connectApiKey.isEmpty()) {
+        emit preparationStatusUpdate(tr("Registering device identity with Raspberry Pi Connect..."));
+
+        // Gather board identifiers for the Connect description field.
+        QString boardDescription;
+        if (auto boardVar = fb.getVar(*transport, "product")) {
+            boardDescription = QString::fromStdString(*boardVar);
+        }
+        QString serial;
+        if (auto serialVar = fb.getVar(*transport, "serialno")) {
+            serial = QString::fromStdString(*serialVar);
+        }
+
+        ConnectDeviceRegistrar registrar(_connectApiKey, _connectDescriptionPrefix);
+        auto result = registrar.registerDevice(fb, *transport,
+                                                boardDescription, serial);
+        if (result.ok) {
+            qDebug() << "Connect: device identity registered, id="
+                     << result.deviceId;
+        } else {
+            qWarning() << "Connect: registration failed:"
+                       << result.errorMessage;
+        }
+    }
+
+    // 11. Best-effort: nudge BOOT_ORDER so the device boots from the
+    //     storage we just wrote. Logs and continues on failure --- the
+    //     image is already written, so we don't want to fail the whole
+    //     run on an EEPROM-side issue.
+    applyBootOrderUpdate(fb, *transport);
+
+    // 12. Finalize
     emit finalizing();
 
     auto resp = fb.sendCommand(*transport, "reboot", 10000);

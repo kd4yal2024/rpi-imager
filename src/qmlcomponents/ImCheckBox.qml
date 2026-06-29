@@ -3,10 +3,11 @@
  * Copyright (C) 2022 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
-import QtQuick.Layouts
 import RpiImager
 
 CheckBox {
@@ -27,18 +28,6 @@ CheckBox {
         text: control.text
     }
     
-    // Access imageWriter from parent context
-    property var imageWriter: {
-        var item = parent;
-        while (item) {
-            if (item.imageWriter !== undefined) {
-                return item.imageWriter;
-            }
-            item = item.parent;
-        }
-        return null;
-    }
-    
     // Custom contentItem with text wrapping for long translations
     contentItem: Text {
         text: control.text
@@ -52,7 +41,7 @@ CheckBox {
     
     // Custom square indicator for embedded mode to avoid rendering artifacts
     Component.onCompleted: {
-        if (control.imageWriter && control.imageWriter.isEmbeddedMode()) {
+        if (ImageWriterSingleton && ImageWriterSingleton.isEmbeddedMode()) {
             control.indicator = squareIndicatorComponent.createObject(control)
         }
     }

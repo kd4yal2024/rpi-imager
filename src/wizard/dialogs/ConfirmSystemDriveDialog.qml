@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2025 Raspberry Pi Ltd
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -37,12 +39,12 @@ BaseDialog {
     Component.onCompleted: {
         registerFocusGroup("warning", function(){ 
             // Only include warning text when screen reader is active (otherwise it's not focusable)
-            return (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? [warningTextElement] : []
+            return (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) ? [warningTextElement] : []
         }, 0)
         registerFocusGroup("input", function(){ 
             // Only include drive name text when screen reader is active (otherwise it's not focusable)
             var items = []
-            if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+            if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                 items.push(driveNameText)
             }
             items.push(nameInput)
@@ -60,7 +62,7 @@ BaseDialog {
     }
 
     // Dialog content
-    Text {
+    FocusableText {
         id: warningTextElement
         textFormat: Text.StyledText
         wrapMode: Text.WordWrap
@@ -69,12 +71,8 @@ BaseDialog {
         color: Style.textDescriptionColor
         Layout.fillWidth: true
         text: root.riskText + "<br><br>" + root.systemDriveText + "<br><br>" + root.proceedText
-        Accessible.role: Accessible.StaticText
         Accessible.name: text.replace(/<[^>]+>/g, '')  // Strip HTML tags for accessibility
         Accessible.ignored: false
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
     Rectangle { implicitHeight: 1; Layout.fillWidth: true; color: Style.titleSeparatorColor; Accessible.ignored: true }
@@ -115,7 +113,7 @@ BaseDialog {
         Accessible.ignored: false
     }
 
-    Text {
+    FocusableText {
         id: driveNameText
         font.family: Style.fontFamily
         font.pointSize: Style.fontSizeSm
@@ -123,12 +121,8 @@ BaseDialog {
         color: Style.textDescriptionColor
         text: root.driveName
         // Make this text focusable when screen reader is active
-        Accessible.role: Accessible.StaticText
         Accessible.name: qsTr("Drive name to type: %1").arg(text)
         Accessible.ignored: false
-        Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
     }
 
     TextField {

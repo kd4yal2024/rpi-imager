@@ -14,18 +14,6 @@ import RpiImager
 ComboBox {
     id: root
     
-    // Access imageWriter from parent context
-    property var imageWriter: {
-        var item = parent;
-        while (item) {
-            if (item.imageWriter !== undefined) {
-                return item.imageWriter;
-            }
-            item = item.parent;
-        }
-        return null;
-    }
-    
     font.family: Style.fontFamily
     font.pointSize: Style.fontSizeInput
 
@@ -202,7 +190,7 @@ ComboBox {
         
         background: Rectangle {
             color: Style.mainBackgroundColor
-            radius: (root.imageWriter && root.imageWriter.isEmbeddedMode()) ? Style.sectionBorderRadiusEmbedded : Style.sectionBorderRadius
+            radius: Style.cornerRadius(Style.sectionBorderRadius)
             border.color: Style.popupBorderColor
             border.width: Style.sectionBorderWidth
             antialiasing: true
@@ -254,8 +242,8 @@ ComboBox {
             
             focus: popupComponent.visible
             interactive: true
-            flickDeceleration: 3000
-            maximumFlickVelocity: 2500
+            flickDeceleration: PlatformHelper.prefersReducedMotion ? 100000 : 3000
+            maximumFlickVelocity: PlatformHelper.prefersReducedMotion ? 0 : 2500
             
             preferredHighlightBegin: 0
             preferredHighlightEnd: height
@@ -363,7 +351,7 @@ ComboBox {
             // Custom highlight that respects popup border radius
             highlight: Rectangle {
                 color: Style.listViewHighlightColor
-                radius: (root.imageWriter && root.imageWriter.isEmbeddedMode()) ? Style.sectionBorderRadiusEmbedded : Style.sectionBorderRadius
+                radius: Style.cornerRadius(Style.sectionBorderRadius)
                 border.color: dropdownList.activeFocus ? Style.buttonFocusedBackgroundColor : "transparent"
                 border.width: dropdownList.activeFocus ? 2 : 0
                 antialiasing: true
@@ -382,7 +370,7 @@ ComboBox {
                 id: listScrollAnimation
                 target: dropdownList
                 property: "contentY"
-                duration: 150
+                duration: PlatformHelper.prefersReducedMotion ? 0 : 150
                 easing.type: Easing.OutCubic
             }
             

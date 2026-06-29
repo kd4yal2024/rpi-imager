@@ -3,11 +3,11 @@
  * Copyright (C) 2020-2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Dialogs
-import QtCore
 import "../qmlcomponents"
 import "components"
 
@@ -15,9 +15,6 @@ import RpiImager
 
 WizardStepBase {
     id: root
-    
-    required property ImageWriter imageWriter
-    required property var wizardContainer
     
     title: qsTr("Customisation: SSH authentication")
     subtitle: qsTr("Configure SSH access")
@@ -49,8 +46,8 @@ WizardStepBase {
                     Layout.fillWidth: true
                     text: qsTr("Enable SSH")
                     accessibleDescription: qsTr("Enable secure shell access for remote command-line control of your Raspberry Pi")
-                    helpLabel: imageWriter.isEmbeddedMode() ? "" : qsTr("Learn about SSH")
-                    helpUrl: imageWriter.isEmbeddedMode() ? "" : "https://www.raspberrypi.com/documentation/computers/remote-access.html#ssh"
+                    helpLabel: ImageWriterSingleton.isEmbeddedMode() ? "" : qsTr("Learn about SSH")
+                    helpUrl: ImageWriterSingleton.isEmbeddedMode() ? "" : "https://www.raspberrypi.com/documentation/computers/remote-access.html#ssh"
                     checked: false
                 }
 
@@ -102,7 +99,6 @@ WizardStepBase {
                     SshKeyManager {
                         id: sshKeyManager
                         Layout.fillWidth: true
-                        imageWriter: root.imageWriter
                         visible: radioPublicKey.checked
                     }
                 }
@@ -209,7 +205,7 @@ WizardStepBase {
         }
         
         // Also persist for future sessions
-        var saved = imageWriter.getSavedCustomisationSettings()
+        var saved = ImageWriterSingleton.getSavedCustomisationSettings()
         if (sshEnablePill.checked) {
             saved.sshEnabled = true
             saved.sshPasswordAuth = radioPassword.checked
@@ -228,7 +224,7 @@ WizardStepBase {
             delete saved.sshAuthorizedKeys
             delete saved.sshPublicKey
         }
-        imageWriter.setSavedCustomisationSettings(saved)
+        ImageWriterSingleton.setSavedCustomisationSettings(saved)
         // Do not log remote access settings (may contain sensitive data)
     }
     

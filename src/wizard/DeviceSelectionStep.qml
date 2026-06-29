@@ -3,8 +3,9 @@
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import "../qmlcomponents"
@@ -14,10 +15,7 @@ import RpiImager
 WizardStepBase {
     id: root
     
-    required property ImageWriter imageWriter
-    required property var wizardContainer
-    
-    readonly property HWListModel hwModel: imageWriter.getHWList()
+    readonly property HWListModel hwModel: ImageWriterSingleton.getHWList()
     
     title: qsTr("Select your Raspberry Pi device")
     showNextButton: true
@@ -47,7 +45,7 @@ WizardStepBase {
     }
 
     Connections {
-        target: imageWriter
+        target: ImageWriterSingleton
         function onOsListPrepared() {
             // If model was loaded but has no items (we were offline), force reload
             if (root.modelLoaded && root.hwModel && root.hwModel.rowCount() === 0) {
@@ -83,7 +81,7 @@ WizardStepBase {
     }
     
     // Track whether OS list is unavailable (no data loaded)
-    readonly property bool osListUnavailable: imageWriter.isOsListUnavailable
+    readonly property bool osListUnavailable: ImageWriterSingleton.isOsListUnavailable
     
     // Content
     content: [
@@ -146,7 +144,7 @@ WizardStepBase {
                     Layout.alignment: Qt.AlignHCenter
                     accessibleDescription: qsTr("Retry downloading the device list")
                     onClicked: {
-                        imageWriter.beginOSListFetch()
+                        ImageWriterSingleton.beginOSListFetch()
                     }
                 }
             }

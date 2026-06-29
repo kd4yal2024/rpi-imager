@@ -9,6 +9,9 @@
 #include <QVariantMap>
 #include <QString>
 #include <QByteArray>
+#include <QPasswordDigestor>
+#include <QCryptographicHash>
+#include <QStringConverter>
 
 using namespace rpi_imager;
 using Catch::Matchers::ContainsSubstring;
@@ -396,9 +399,8 @@ TEST_CASE("CustomisationGenerator handles quotes in WiFi SSID", "[customization]
     QByteArray script = CustomisationGenerator::generateSystemdScript(settings);
     QString scriptStr = QString::fromUtf8(script);
     
-    // Quotes should be escaped in wpa_supplicant.conf
-    REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("ssid=\"My \\\"Quoted\\\" Network\""));
-    // Should still be properly shell-quoted for imager_custom
+    // Embedded quotes require hex encoding to preserve exact SSID octets
+    REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("ssid=hex:4d79202251756f74656422204e6574776f726b"));
     REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("set_wlan"));
 }
 
@@ -412,32 +414,406 @@ TEST_CASE("CustomisationGenerator handles backslashes in WiFi SSID", "[customiza
     QByteArray script = CustomisationGenerator::generateSystemdScript(settings);
     QString scriptStr = QString::fromUtf8(script);
     
-    // Backslashes should be escaped in wpa_supplicant.conf
-    REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("ssid=\"Network\\\\With\\\\Backslashes\""));
+    // Backslashes require hex encoding to preserve exact SSID octets
+    REQUIRE_THAT(scriptStr.toStdString(),
+                 ContainsSubstring("ssid=hex:4e6574776f726b5c576974685c4261636b736c6173686573"));
 }
 
-TEST_CASE("CustomisationGenerator handles non-ASCII UTF-8 WiFi SSID", "[customization][negative]") {
+TEST_CASE("CustomisationGenerator handles non-ASCII UTF-8 WiFi SSID", "[customization][wifi][exotic]") {
     QVariantMap settings;
     settings["wifiConfigured"] = true;
     settings["wifiSSID"] = "Café ☕ 日本語";
     settings["wifiPasswordCrypt"] = "fakehash";  // Pre-computed PSK (passwords are ASCII-only per WPA2 spec)
     settings["recommendedWifiCountry"] = "FR";
-    
+
     QByteArray script = CustomisationGenerator::generateSystemdScript(settings);
     QString scriptStr = QString::fromUtf8(script);
-    
+
     // NOTE: SSIDs support full UTF-8 per WiFi spec. Passwords are ASCII-only (8-63 chars) or
     // pre-computed 64-char hex PSK per WPA2/WPA3 spec. The UI enforces this correctly.
     // This test validates the generator handles UTF-8 SSIDs robustly for:
     // - Edge cases that bypass UI validation
     // - Future WPA standards that may allow UTF-8 passphrases
     // - Programmatic/CLI usage
-    
-    // UTF-8 characters should pass through correctly in both paths
+
     REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("wpa_supplicant.conf"));
     REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("Café ☕ 日本語"));
-    // Also verify shell-quoted path works
     REQUIRE_THAT(scriptStr.toStdString(), ContainsSubstring("set_wlan"));
+
+    QByteArray netcfg = CustomisationGenerator::generateCloudInitNetworkConfig(settings, false);
+    QString yaml = QString::fromUtf8(netcfg);
+    const QByteArray escaped = CustomisationGenerator::yamlEscapeSsidOctets(
+        settings.value("wifiSSID").toString().toUtf8());
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"" + escaped.toStdString() + "\":"));
+}
+
+namespace {
+
+QVariantMap exoticWifiSettings(const QString& ssid,
+                               const QString& cryptedPsk = QStringLiteral("fakecryptedhash123"),
+                               bool hidden = false)
+{
+    QVariantMap settings;
+    settings["wifiConfigured"] = true;
+    settings["wifiSSID"] = ssid;
+    settings["wifiPasswordCrypt"] = cryptedPsk;
+    settings["recommendedWifiCountry"] = "GB";
+    if (hidden)
+        settings["wifiHidden"] = true;
+    return settings;
+}
+
+QVariantMap exoticWifiSettingsFromOctets(const QByteArray& ssidOctets,
+                                         const QString& cryptedPsk = QStringLiteral("fakecryptedhash123"),
+                                         bool hidden = false)
+{
+    QVariantMap settings;
+    settings["wifiConfigured"] = true;
+    settings["wifiSsidOctets"] = ssidOctets;
+    settings["wifiPasswordCrypt"] = cryptedPsk;
+    settings["recommendedWifiCountry"] = "GB";
+    if (hidden)
+        settings["wifiHidden"] = true;
+    return settings;
+}
+
+bool wpaUsesHexEncoding(const QByteArray& ssidOctets)
+{
+    auto converter = QStringDecoder(QStringConverter::Utf8);
+    converter(ssidOctets);
+    if (converter.hasError())
+        return true;
+    for (unsigned char byte : ssidOctets) {
+        if (byte < 0x20 || byte == 0x7F || byte == '\\' || byte == '"')
+            return true;
+    }
+    return false;
+}
+
+void requireSsidOctetsPreservedInSystemdScript(const QByteArray& ssidOctets)
+{
+    const QString script = QString::fromUtf8(
+        CustomisationGenerator::generateSystemdScript(exoticWifiSettingsFromOctets(ssidOctets)));
+
+    QStringDecoder decoder(QStringConverter::Utf8);
+    decoder(ssidOctets);
+    const bool imagerCustomSafe = !ssidOctets.contains('\0') && !decoder.hasError();
+    if (imagerCustomSafe) {
+        REQUIRE_THAT(script.toStdString(),
+                     ContainsSubstring("set_wlan '" + QString::fromUtf8(ssidOctets).toStdString() + "'"));
+    } else {
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("imager_custom ] && false"));
+    }
+
+    if (wpaUsesHexEncoding(ssidOctets)) {
+        REQUIRE_THAT(script.toStdString(),
+                     ContainsSubstring("ssid=hex:" + ssidOctets.toHex().toStdString()));
+    } else {
+        REQUIRE_THAT(script.toStdString(),
+                     ContainsSubstring("ssid=\"" + QString::fromUtf8(ssidOctets).toStdString() + "\""));
+    }
+}
+
+void requireSsidOctetsPreservedInCloudInitYaml(const QByteArray& ssidOctets)
+{
+    const QString yaml = QString::fromUtf8(
+        CustomisationGenerator::generateCloudInitNetworkConfig(exoticWifiSettingsFromOctets(ssidOctets), false));
+    const QByteArray escaped = CustomisationGenerator::yamlEscapeSsidOctets(ssidOctets);
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"" + escaped.toStdString() + "\":"));
+}
+
+void requireSsidPreservedInSystemdScript(const QString& ssid)
+{
+    requireSsidOctetsPreservedInSystemdScript(ssid.toUtf8());
+}
+
+void requireSsidPreservedInCloudInitYaml(const QString& ssid)
+{
+    requireSsidOctetsPreservedInCloudInitYaml(ssid.toUtf8());
+}
+
+} // namespace
+
+TEST_CASE("CustomisationGenerator handles malformed UTF-8 octets and Unicode homograph edges",
+          "[customization][cloudinit][network][wifi][exotic]") {
+    // IEEE 802.11 SSIDs are 0-32 opaque octets. Programmatic callers can supply raw
+    // bytes via wifiSsidOctets; the UI path UTF-8 encodes the entered text instead.
+
+    SECTION("SSID whose last octet is a UTF-8 continuation byte (0xBF) without a leading byte") {
+        QByteArray octets("net", 3);
+        octets.append(char(0xBF));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("SSID whose last octet is UTF-8 continuation byte 0x80") {
+        QByteArray octets("wifi", 4);
+        octets.append(char(0x80));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("SSID ending in a truncated UTF-8 multibyte sequence (lead byte only)") {
+        QByteArray octets("open", 4);
+        octets.append(char(0xC3));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("SSID ending in a truncated three-byte UTF-8 sequence (Euro without final byte)") {
+        QByteArray octets("cost", 4);
+        octets.append(char(0xE2));
+        octets.append(char(0x82));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("32-octet SSID ending in continuation byte 0xBE") {
+        QByteArray octets(32, 'X');
+        octets[31] = char(0xBE);
+        requireSsidOctetsPreservedInSystemdScript(octets);
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("NFC and NFD forms of the same visual name are distinct SSIDs") {
+        const QString nfc = QStringLiteral("caf\u00E9");       // precomposed é
+        const QString nfd = QStringLiteral("cafe\u0301");       // e + combining acute
+        REQUIRE(nfc != nfd);
+        REQUIRE(nfc.toUtf8() != nfd.toUtf8());
+
+        requireSsidPreservedInSystemdScript(nfc);
+        requireSsidPreservedInSystemdScript(nfd);
+        requireSsidPreservedInCloudInitYaml(nfc);
+        requireSsidPreservedInCloudInitYaml(nfd);
+    }
+
+    SECTION("Homoglyph SSIDs using confusable Cyrillic and Latin letters differ") {
+        const QString latin = QStringLiteral("AccessPoint");
+        const QString homoglyph = QString(QChar(0x0410)) + QStringLiteral("ccessPoint"); // Cyrillic А
+        REQUIRE(latin != homoglyph);
+
+        requireSsidPreservedInSystemdScript(latin);
+        requireSsidPreservedInSystemdScript(homoglyph);
+        requireSsidPreservedInCloudInitYaml(latin);
+        requireSsidPreservedInCloudInitYaml(homoglyph);
+    }
+
+    SECTION("Incomplete grapheme cluster: lone combining mark without base character") {
+        const QString ssid = QString(QChar(0x0301)); // combining acute, no base letter
+        REQUIRE(ssid.length() == 1);
+
+        requireSsidPreservedInSystemdScript(ssid);
+        requireSsidPreservedInCloudInitYaml(ssid);
+    }
+
+    SECTION("Bidirectional override character in SSID") {
+        const QString ssid = QStringLiteral("safe") + QChar(0x202E) + QStringLiteral("name");
+        requireSsidPreservedInSystemdScript(ssid);
+        requireSsidPreservedInCloudInitYaml(ssid);
+    }
+
+    SECTION("Legacy PBKDF2 uses exact SSID octets for distinct malformed values") {
+        QByteArray truncatedEuro("cost", 4);
+        truncatedEuro.append(char(0xE2));
+        truncatedEuro.append(char(0x82));
+
+        QByteArray loneLead("x", 1);
+        loneLead.append(char(0xC3));
+        REQUIRE(truncatedEuro != loneLead);
+
+        QVariantMap settings = exoticWifiSettingsFromOctets(truncatedEuro);
+        settings.remove("wifiPasswordCrypt");
+        settings["wifiPassword"] = "password1";
+
+        const QString expectedPsk = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha1,
+            QByteArray("password1"),
+            truncatedEuro,
+            4096,
+            32).toHex();
+
+        const QString script = QString::fromUtf8(CustomisationGenerator::generateSystemdScript(settings));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("\tpsk=" + expectedPsk.toStdString()));
+    }
+}
+
+TEST_CASE("CustomisationGenerator handles exotic WiFi SSIDs in systemd script", "[customization][wifi][exotic]") {
+    SECTION("SSID beginning with a hyphen") {
+        const QString ssid = "-foobar";
+        const QString script = QString::fromUtf8(
+            CustomisationGenerator::generateSystemdScript(exoticWifiSettings(ssid)));
+
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("set_wlan '-foobar'"));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("ssid=\"-foobar\""));
+    }
+
+    SECTION("SSID beginning with multiple hyphens") {
+        const QString ssid = "---hidden-net";
+        const QString script = QString::fromUtf8(
+            CustomisationGenerator::generateSystemdScript(exoticWifiSettings(ssid)));
+
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("set_wlan '---hidden-net'"));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("ssid=\"---hidden-net\""));
+    }
+
+    SECTION("Hidden network with hyphen-prefixed SSID keeps -h flag separate from SSID") {
+        const QString ssid = "-foobar";
+        const QString script = QString::fromUtf8(
+            CustomisationGenerator::generateSystemdScript(exoticWifiSettings(ssid, "fakehash", true)));
+
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("set_wlan  -h '-foobar'"));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("scan_ssid=1"));
+    }
+
+    SECTION("SSID with emoji, RTL scripts, and combining characters") {
+        const QString ssid = QStringLiteral("📶 WiFi שָׁלוֹם مرحبا e\u0301t\u0301");
+        requireSsidOctetsPreservedInSystemdScript(ssid.toUtf8());
+    }
+
+    SECTION("SSID containing arbitrary non-UTF-8 octets") {
+        QByteArray octets;
+        octets.append('-');
+        octets.append(QByteArray::fromHex("cafe"));
+        octets.append(char(0xFF));
+        octets.append(char(0x80));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+    }
+
+    SECTION("SSID at IEEE 802.11 maximum length of 32 octets") {
+        QByteArray octets(32, '\0');
+        octets[0] = '-';
+        octets.replace(1, 31, QByteArray(31, 'A'));
+        requireSsidOctetsPreservedInSystemdScript(octets);
+    }
+
+    SECTION("Legacy plaintext passphrase beginning with a hyphen") {
+        QVariantMap settings = exoticWifiSettings("-network");
+        settings.remove("wifiPasswordCrypt");
+        settings["wifiPassword"] = "-secretpw";
+
+        const QString expectedPsk = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha1,
+            QByteArray("-secretpw"),
+            QByteArray("-network"),
+            4096,
+            32).toHex();
+
+        const QString script = QString::fromUtf8(CustomisationGenerator::generateSystemdScript(settings));
+
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("set_wlan '-network' '" + expectedPsk.toStdString() + "'"));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("\tpsk=" + expectedPsk.toStdString()));
+    }
+
+    SECTION("Legacy UTF-8 passphrase with exotic SSID derives deterministic PSK") {
+        QVariantMap settings = exoticWifiSettings("Café-📶");
+        settings.remove("wifiPasswordCrypt");
+        settings["wifiPassword"] = "パスワード123";
+
+        const QString expectedPsk = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha1,
+            QString("パスワード123").toUtf8(),
+            QString("Café-📶").toUtf8(),
+            4096,
+            32).toHex();
+
+        const QString script = QString::fromUtf8(CustomisationGenerator::generateSystemdScript(settings));
+
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("set_wlan 'Café-📶' '" + expectedPsk.toStdString() + "'"));
+        REQUIRE_THAT(script.toStdString(), ContainsSubstring("\tpsk=" + expectedPsk.toStdString()));
+    }
+}
+
+TEST_CASE("CustomisationGenerator handles exotic WiFi SSIDs in cloud-init network-config",
+          "[cloudinit][network][wifi][exotic]") {
+    SECTION("SSID beginning with a hyphen") {
+        const QString yaml = QString::fromUtf8(
+            CustomisationGenerator::generateCloudInitNetworkConfig(exoticWifiSettings("-foobar"), false));
+
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"-foobar\":"));
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("password: \"fakecryptedhash123\""));
+    }
+
+    SECTION("SSID beginning with multiple hyphens") {
+        const QString yaml = QString::fromUtf8(
+            CustomisationGenerator::generateCloudInitNetworkConfig(exoticWifiSettings("---mesh-node"), false));
+
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"---mesh-node\":"));
+    }
+
+    SECTION("Hidden network with hyphen-prefixed SSID") {
+        const QString yaml = QString::fromUtf8(
+            CustomisationGenerator::generateCloudInitNetworkConfig(exoticWifiSettings("-foobar", "fakehash", true), false));
+
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"-foobar\":"));
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("hidden: true"));
+    }
+
+    SECTION("SSID with emoji, RTL scripts, and combining characters") {
+        const QString ssid = QStringLiteral("📶 WiFi שָׁלוֹם مرحبا e\u0301t\u0301");
+        requireSsidOctetsPreservedInCloudInitYaml(ssid.toUtf8());
+    }
+
+    SECTION("SSID containing null and other control octets") {
+        QByteArray octets("-net", 4);
+        octets.append(char(0x00));
+        octets.append(char(0x09));
+        octets.append(char(0x01));
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("SSID containing arbitrary non-UTF-8 octets") {
+        QByteArray octets;
+        octets.append('-');
+        octets.append(QByteArray::fromHex("cafe"));
+        octets.append(char(0xFF));
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("SSID at IEEE 802.11 maximum length of 32 octets") {
+        QByteArray octets(32, '\0');
+        octets[0] = '-';
+        octets.replace(1, 31, QByteArray(31, 'B'));
+        requireSsidOctetsPreservedInCloudInitYaml(octets);
+    }
+
+    SECTION("Legacy plaintext passphrase beginning with a hyphen") {
+        QVariantMap settings = exoticWifiSettings("-network");
+        settings.remove("wifiPasswordCrypt");
+        settings["wifiPassword"] = "-secretpw";
+
+        const QString expectedPsk = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha1,
+            QByteArray("-secretpw"),
+            QByteArray("-network"),
+            4096,
+            32).toHex();
+
+        const QString yaml = QString::fromUtf8(
+            CustomisationGenerator::generateCloudInitNetworkConfig(settings, false));
+
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"-network\":"));
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("password: \"" + expectedPsk.toStdString() + "\""));
+    }
+
+    SECTION("Legacy UTF-8 passphrase with exotic SSID derives deterministic PSK") {
+        QVariantMap settings = exoticWifiSettings("Café-📶");
+        settings.remove("wifiPasswordCrypt");
+        settings["wifiPassword"] = "パスワード123";
+
+        const QString expectedPsk = QPasswordDigestor::deriveKeyPbkdf2(
+            QCryptographicHash::Sha1,
+            QString("パスワード123").toUtf8(),
+            QString("Café-📶").toUtf8(),
+            4096,
+            32).toHex();
+
+        const QString yaml = QString::fromUtf8(
+            CustomisationGenerator::generateCloudInitNetworkConfig(settings, false));
+
+        const QByteArray escapedKey = CustomisationGenerator::yamlEscapeSsidOctets(QString("Café-📶").toUtf8());
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("\"" + escapedKey.toStdString() + "\":"));
+        REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("password: \"" + expectedPsk.toStdString() + "\""));
+    }
 }
 
 TEST_CASE("CustomisationGenerator handles multiline SSH key", "[customization][negative]") {
@@ -487,9 +863,9 @@ TEST_CASE("CustomisationGenerator cloud-init handles SSH public key only (no use
     QString yaml = QString::fromUtf8(userdata);
     
     // Should generate users section even without explicit username
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("enable_ssh: true"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: pi"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: pi"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh_authorized_keys:"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh-ed25519"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("lock_passwd: true"));
@@ -662,10 +1038,9 @@ TEST_CASE("CustomisationGenerator generates cloud-init user-data with SSH user",
     QByteArray userdata = CustomisationGenerator::generateCloudInitUserData(settings, QString(), false, true, "testuser");
     QString yaml = QString::fromUtf8(userdata);
     
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("enable_ssh: true"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: testuser"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: testuser"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("shell: /bin/bash"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("lock_passwd: false"));
     // Password hash should be quoted for proper YAML parsing
@@ -684,9 +1059,8 @@ TEST_CASE("CustomisationGenerator generates cloud-init user-data with user crede
     QString yaml = QString::fromUtf8(userdata);
     
     // User configuration MUST be generated even without SSH
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: localuser"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: localuser"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("shell: /bin/bash"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("lock_passwd: false"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("passwd: \"$5$fakesalt$fakehash456\""));
@@ -705,7 +1079,7 @@ TEST_CASE("CustomisationGenerator generates cloud-init user-data with SSH keys",
     QByteArray userdata = CustomisationGenerator::generateCloudInitUserData(settings, QString(), false, true, "testuser");
     QString yaml = QString::fromUtf8(userdata);
     
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("enable_ssh: true"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh_authorized_keys:"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- \"ssh-rsa AAAAB3...key1\""));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- \"ssh-rsa AAAAB3...key2\""));
@@ -725,8 +1099,14 @@ TEST_CASE("CustomisationGenerator cloud-init passwordless sudo when explicitly e
     QByteArray userdata = CustomisationGenerator::generateCloudInitUserData(settings, QString(), false, false, "testuser");
     QString yaml = QString::fromUtf8(userdata);
 
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: testuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: testuser"));
+    // sudo: user property for standard cloud-init
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("sudo: ALL=(ALL) NOPASSWD:ALL"));
+    // runcmd fallback for implementations that don't process sudo: user property
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("runcmd:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("testuser ALL=(ALL) NOPASSWD:ALL"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("/etc/sudoers.d/010_testuser-nopasswd"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("chmod"));
 }
 
 TEST_CASE("CustomisationGenerator cloud-init no passwordless sudo by default", "[cloudinit][userdata][sudo]") {
@@ -737,7 +1117,7 @@ TEST_CASE("CustomisationGenerator cloud-init no passwordless sudo by default", "
     QByteArray userdata = CustomisationGenerator::generateCloudInitUserData(settings, QString(), false, false, "testuser");
     QString yaml = QString::fromUtf8(userdata);
 
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: testuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: testuser"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("sudo: ALL=(ALL) NOPASSWD:ALL"));
 }
 
@@ -1060,7 +1440,7 @@ TEST_CASE("Independent step: Hostname only", "[cloudinit][independent][hostname]
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("preserve_sources_list: true"));
     
     // No other customization should be present
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("timezone:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("keyboard:"));
@@ -1089,7 +1469,7 @@ TEST_CASE("Independent step: Timezone only", "[cloudinit][independent][locale]")
     
     // No other customization should be present
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("keyboard:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("rpi:"));
@@ -1119,7 +1499,7 @@ TEST_CASE("Independent step: Keyboard only", "[cloudinit][independent][locale]")
     
     // No other customization should be present
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("timezone:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("rpi:"));
@@ -1149,7 +1529,7 @@ TEST_CASE("Independent step: Locale (timezone + keyboard)", "[cloudinit][indepen
     
     // No other customization should be present
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("rpi:"));
 }
@@ -1165,9 +1545,8 @@ TEST_CASE("Independent step: User credentials only (no SSH)", "[cloudinit][indep
     QString yaml = QString::fromUtf8(userdata);
     
     // User configuration MUST be generated independently of SSH
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: alice"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("groups: users,adm,dialout,audio,netdev,video,plugdev,cdrom,games,input,gpio,spi,i2c,render,sudo"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: alice"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("shell: /bin/bash"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("lock_passwd: false"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("passwd: \"$6$rounds=4096$salt$hashvalue\""));
@@ -1222,7 +1601,7 @@ TEST_CASE("Independent step: WiFi only", "[cloudinit][independent][wifi]") {
     
     // No other customization in userdata
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("timezone:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("keyboard:"));
@@ -1239,11 +1618,11 @@ TEST_CASE("Independent step: SSH with password auth only", "[cloudinit][independ
     QString yaml = QString::fromUtf8(userdata);
     
     // SSH configuration MUST be generated
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("enable_ssh: true"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh_pwauth: true"));
     
     // No user section without credentials
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     
     // No other customization should be present
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("hostname:"));
@@ -1269,12 +1648,12 @@ TEST_CASE("Independent step: SSH with public keys only", "[cloudinit][independen
     QString yaml = QString::fromUtf8(userdata);
     
     // SSH configuration MUST be generated
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("enable_ssh: true"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh_pwauth: false"));
     
     // User section is created for SSH key deployment (using currentUser fallback)
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: defaultuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: defaultuser"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("ssh_authorized_keys:"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- \"ssh-ed25519"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("lock_passwd: true"));
@@ -1303,7 +1682,7 @@ TEST_CASE("Independent step: Interfaces only (I2C)", "[cloudinit][independent][i
     
     // No other customization should be present
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("timezone:"));
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("keyboard:"));
@@ -1392,8 +1771,8 @@ TEST_CASE("Independent step: Pi Connect only (with required user)", "[cloudinit]
     QString yaml = QString::fromUtf8(userdata);
     
     // User configuration MUST be generated
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: connectuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: connectuser"));
     
     // Pi Connect configuration MUST be generated
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("runcmd:"));
@@ -1435,8 +1814,8 @@ TEST_CASE("Combined steps: User + Hostname (no SSH)", "[cloudinit][combined]") {
     
     // Both must be generated
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("hostname: workstation"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: developer"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: developer"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("passwd:"));
     
     // SSH not enabled
@@ -1458,8 +1837,8 @@ TEST_CASE("Combined steps: User + WiFi (no SSH)", "[cloudinit][combined]") {
     QString netcfgYaml = QString::fromUtf8(netcfg);
     
     // User config must be generated
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("- name: wifiuser"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("  name: wifiuser"));
     
     // WiFi config must be generated
     REQUIRE_THAT(netcfgYaml.toStdString(), ContainsSubstring("\"OfficeWiFi\":"));
@@ -1482,8 +1861,8 @@ TEST_CASE("Combined steps: All locale + User (no SSH)", "[cloudinit][combined]")
     // All must be generated
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("timezone: Asia/Tokyo"));
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("layout: \"jp\""));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: jpuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: jpuser"));
     
     // SSH not enabled
     REQUIRE_THAT(yaml.toStdString(), !ContainsSubstring("enable_ssh:"));
@@ -1501,8 +1880,8 @@ TEST_CASE("Combined steps: User + Interfaces (no SSH)", "[cloudinit][combined]")
     QString yaml = QString::fromUtf8(userdata);
     
     // User must be generated
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("- name: iotuser"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("  name: iotuser"));
     
     // Interfaces must be generated
     REQUIRE_THAT(yaml.toStdString(), ContainsSubstring("rpi:"));
@@ -1536,8 +1915,8 @@ TEST_CASE("Combined steps: Full customization without SSH", "[cloudinit][combine
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("hostname: fullpi"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("timezone: Europe/Berlin"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("layout: \"de\""));
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("- name: fulluser"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("  name: fulluser"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("passwd:"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("rpi:"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("i2c: true"));
@@ -1574,14 +1953,14 @@ TEST_CASE("Combined steps: Full customization with SSH", "[cloudinit][combined]"
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("hostname: sshpi"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("timezone: UTC"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("layout: \"us\""));
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("users:"));
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("- name: sshuser"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("user:"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("  name: sshuser"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("passwd:"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("rpi:"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("spi: true"));
     
     // SSH configuration must be present
-    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("enable_ssh: true"));
+    REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("[ systemctl, enable, --now, ssh ]"));
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("ssh_pwauth: true"));
     
     // WiFi in network config
@@ -1603,7 +1982,7 @@ TEST_CASE("CustomisationGenerator handles empty cloud-init settings gracefully",
     REQUIRE_THAT(userdataYaml.toStdString(), ContainsSubstring("manage_resolv_conf: false"));
     // Should NOT have any user-specific configuration
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("hostname:"));
-    REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("users:"));
+    REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("user:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("enable_ssh:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("timezone:"));
     REQUIRE_THAT(userdataYaml.toStdString(), !ContainsSubstring("keyboard:"));

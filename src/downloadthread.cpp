@@ -95,6 +95,7 @@ DownloadThread::DownloadThread(const QByteArray &url, const QByteArray &localfil
     _debugAsyncQueueDepth = 16; // Default queue depth
     _debugIPv4Only = false;     // Use both IPv4 and IPv6 by default
     _debugSkipEndOfDevice = false; // For counterfeit cards with fake capacity
+    _debugIgnoreDeviceLimits = false; // Ignore device-reported I/O limits
     
     // Initialize bottleneck detection
     _currentBottleneck = BottleneckState::None;
@@ -320,9 +321,53 @@ bool DownloadThread::_openAndPrepareDevice()
 
     // Device path is already platform-optimized by caller (e.g., rdisk on macOS)
     rpi_imager::FileError result = _file->OpenDevice(filename_str);
+
+#ifdef Q_OS_WIN
+    // On Windows, the device may be temporarily held by the OS after volume
+    // dismount/clean operations (especially on Windows 11 25H2+).
+    // Retry with geometric backoff, keeping the user informed.
+    if (result != rpi_imager::FileError::kSuccess)
+    {
+        int lastErr = _file->GetLastErrorCode();
+        // Only retry for transient access errors, not permanent failures
+        if (lastErr == ERROR_ACCESS_DENIED || lastErr == ERROR_SHARING_VIOLATION || lastErr == ERROR_NOT_READY)
+        {
+            constexpr int kMaxRetries = 8;
+            constexpr int kInitialDelayMs = 250;
+            int delayMs = kInitialDelayMs;
+
+            for (int attempt = 1; attempt <= kMaxRetries && !_cancelled; attempt++)
+            {
+                int totalWaitSec = 0;
+                int d = kInitialDelayMs;
+                for (int i = 1; i < attempt; i++) { totalWaitSec += d; d *= 2; }
+                totalWaitSec = (totalWaitSec + delayMs) / 1000;
+
+                emit preparationStatusUpdate(tr("Waiting for drive to become available... (%1s)")
+                    .arg(totalWaitSec));
+                qDebug() << "OpenDevice retry" << attempt << "of" << kMaxRetries
+                         << "after error" << lastErr << "- waiting" << delayMs << "ms";
+
+                QThread::msleep(delayMs);
+                delayMs *= 2;
+
+                result = _file->OpenDevice(filename_str);
+                if (result == rpi_imager::FileError::kSuccess)
+                {
+                    qDebug() << "OpenDevice succeeded on retry" << attempt;
+                    break;
+                }
+                lastErr = _file->GetLastErrorCode();
+                if (lastErr != ERROR_ACCESS_DENIED && lastErr != ERROR_SHARING_VIOLATION && lastErr != ERROR_NOT_READY)
+                    break;  // Non-transient error, stop retrying
+            }
+        }
+    }
+#endif
+
     qint64 authOpenMs = authTimer.elapsed();
     qDebug() << "Device authorization and open took" << authOpenMs << "ms";
-    
+
     if (result != rpi_imager::FileError::kSuccess)
     {
 #ifdef Q_OS_DARWIN
@@ -355,6 +400,31 @@ bool DownloadThread::_openAndPrepareDevice()
         _file->SetDirectIOEnabled(true);
     }
     
+    // Cap async queue depth based on device-reported I/O limits.
+    // USB card readers often expose very few request slots (e.g. nr_requests=2).
+    // Without this cap, submitting hundreds of concurrent writes can overwhelm the
+    // device queue and stall async completions entirely. See #1592.
+    {
+        const auto& limits = _file->GetDeviceIOLimits();
+        if (_debugAsyncIO && limits.suggested_queue_depth > 0 && !_debugIgnoreDeviceLimits)
+        {
+            // Use 3x the device's queue depth for write-ahead latency hiding.
+            // Network downloads feed the write queue in bursts (jitter + decompression),
+            // so we need more headroom than pure sequential I/O to prevent device
+            // starvation during pipeline stalls.  See #1592.
+            int deviceCap = qMax(4, limits.suggested_queue_depth * 3);
+            if (deviceCap < _debugAsyncQueueDepth)
+            {
+                qDebug() << "Capping async queue depth from" << _debugAsyncQueueDepth
+                         << "to" << deviceCap
+                         << "(device suggested:" << limits.suggested_queue_depth << ")";
+                _debugAsyncQueueDepth = deviceCap;
+            }
+        }
+        if (limits.max_transfer_bytes > 0)
+            qDebug() << "Device max transfer:" << limits.max_transfer_bytes << "bytes";
+    }
+
     // Configure async I/O if enabled
     if (_debugAsyncIO && _file->IsAsyncIOSupported()) {
         bool asyncConfigured = _file->SetAsyncQueueDepth(_debugAsyncQueueDepth);
@@ -525,6 +595,11 @@ void DownloadThread::run()
     {
         return;
     }
+
+    // Give subclasses a chance to adjust buffers now that debug flags and device
+    // limits are known.  Called after _openAndPrepareDevice() but before any
+    // ring-buffer access (which starts when curl_easy_perform delivers data).
+    _onDevicePrepared();
 
     // URL logged only on error
     if (_url.startsWith("file://") && _url.at(7) != '/')
@@ -1391,6 +1466,18 @@ void DownloadThread::_onDownloadSuccess()
 void DownloadThread::_onDownloadError(const QString &msg)
 {
     _cancelled = true;
+
+    // Drop the device handle before asking the OS to refresh its view of the
+    // disk — an open handle can hold off re-enumeration on Windows.
+    // _closeFiles() is idempotent, so double-close from later cleanup is fine.
+    _closeFiles();
+
+    // If we got far enough to wipe and open the target's partition table, the
+    // OS may be holding a stale view of the disk (no drive letter, no visible
+    // partitions) — give it a chance to re-enumerate before we report the
+    // failure. No-op on platforms where the kernel does this automatically.
+    PlatformQuirks::refreshDiskView(_filename);
+
     emit error(msg);
 }
 
@@ -1473,49 +1560,36 @@ void DownloadThread::_onWriteError()
     if (_cancelled)
         return;
 
-#ifdef Q_OS_WIN
-    // TODO: Implement platform-specific error handling in FileOperations
-    // For now, provide generic error message instead of: if (_file.errorCode() == ERROR_ACCESS_DENIED)
-    if (false) // Temporarily disabled
+    switch (_file->ClassifyLastWriteError())
     {
-        QString msg = tr("Access denied error while writing file to disk.");
-        QSettings registry("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Defender\\Windows Defender Exploit Guard\\Controlled Folder Access",
-                           QSettings::Registry64Format);
-        if (registry.value("EnableControlledFolderAccess").toInt() == 1)
-        {
-            msg += "<br>"+tr("Controlled Folder Access seems to be enabled. Please add rpi-imager.exe to the list of allowed apps and try again.");
-        }
-        else
-        {
-            msg += "<br>"+tr("The disk may be write-protected or in use by another application. Please ensure the disk is not mounted and try again.");
-        }
-        _onDownloadError(msg);
+        case rpi_imager::WriteErrorClass::kAccessDeniedControlledFolderAccess:
+            _onDownloadError(tr("Access denied error while writing file to disk.") + "<br>" +
+                             tr("Controlled Folder Access seems to be enabled. Please add rpi-imager.exe to the list of allowed apps and try again."));
+            return;
+        case rpi_imager::WriteErrorClass::kAccessDenied:
+            _onDownloadError(tr("Access denied error while writing file to disk.") + "<br>" +
+                             tr("The disk may be write-protected or in use by another application. Please ensure the disk is not mounted and try again."));
+            return;
+        case rpi_imager::WriteErrorClass::kDiskFull:
+            _onDownloadError(tr("Disk is full. Please use a larger storage device."));
+            return;
+        case rpi_imager::WriteErrorClass::kWriteProtected:
+            _onDownloadError(tr("The disk is write-protected. Please check if the disk has a physical write-protect switch or is read-only."));
+            return;
+        case rpi_imager::WriteErrorClass::kMediaError:
+            _onDownloadError(tr("Media error detected. The storage device may be damaged or counterfeit. Please try a different device."));
+            return;
+        case rpi_imager::WriteErrorClass::kInvalidParameter:
+            _onDownloadError(tr("Invalid disk parameter. The storage device may not be properly recognized. Please try reconnecting the device."));
+            return;
+        case rpi_imager::WriteErrorClass::kIoDeviceError:
+            _onDownloadError(tr("I/O device error. The storage device may have been disconnected or is malfunctioning."));
+            return;
+        case rpi_imager::WriteErrorClass::kUnknown:
+            break;
     }
-    else if (_file->GetLastErrorCode() == ERROR_DISK_FULL)
-    {
-        _onDownloadError(tr("Disk is full. Please use a larger storage device."));
-    }
-    else if (_file->GetLastErrorCode() == ERROR_WRITE_PROTECT)
-    {
-        _onDownloadError(tr("The disk is write-protected. Please check if the disk has a physical write-protect switch or is read-only."));
-    }
-    else if (_file->GetLastErrorCode() == ERROR_SECTOR_NOT_FOUND || _file->GetLastErrorCode() == ERROR_CRC)
-    {
-        _onDownloadError(tr("Media error detected. The storage device may be damaged or counterfeit. Please try a different device."));
-    }
-    else if (_file->GetLastErrorCode() == ERROR_INVALID_PARAMETER)
-    {
-        _onDownloadError(tr("Invalid disk parameter. The storage device may not be properly recognized. Please try reconnecting the device."));
-    }
-    else if (_file->GetLastErrorCode() == ERROR_IO_DEVICE)
-    {
-        _onDownloadError(tr("I/O device error. The storage device may have been disconnected or is malfunctioning."));
-    }
-    else
-    {
-        _onDownloadError(tr("Error writing to storage device. Please check if the device is writable, has sufficient space, and is not write-protected."));
-    }
-#endif
+
+    _onDownloadError(tr("Error writing to storage device. Please check if the device is writable, has sufficient space, and is not write-protected."));
 }
 
 void DownloadThread::_closeFiles()
@@ -1688,6 +1762,12 @@ void DownloadThread::_writeComplete()
             emit cacheFileUpdated(computedHash);
         }
     }
+
+    // Stop the watchdog before the final sync. No progress indicators can
+    // advance during fdatasync/fsync, but the device is still working — slow
+    // cards can take minutes to flush their internal cache after sustained writes.
+    // Uses BlockingQueuedConnection so the watchdog is stopped before we block.
+    emit finalSyncStarting();
 
     rpi_imager::FileError flushResult = _file->Flush();
     if (flushResult != rpi_imager::FileError::kSuccess)
@@ -2211,6 +2291,12 @@ void DownloadThread::setDebugSkipEndOfDevice(bool enabled)
 {
     _debugSkipEndOfDevice = enabled;
     qDebug() << "DownloadThread: Skip end-of-device operations" << (enabled ? "enabled (for counterfeit cards)" : "disabled");
+}
+
+void DownloadThread::setDebugIgnoreDeviceLimits(bool enabled)
+{
+    _debugIgnoreDeviceLimits = enabled;
+    qDebug() << "DownloadThread: Ignore device I/O limits" << (enabled ? "enabled" : "disabled");
 }
 
 bool DownloadThread::_customizeImage()

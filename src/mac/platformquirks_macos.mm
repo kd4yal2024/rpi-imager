@@ -21,6 +21,8 @@
 #import <AppKit/AppKit.h>
 #import <SystemConfiguration/SystemConfiguration.h>
 #import <DiskArbitration/DiskArbitration.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <CoreServices/CoreServices.h>  // LSSetDefaultHandlerForURLScheme
 #include <os/log.h>
 
 // Unified logging - visible in Console.app
@@ -377,6 +379,28 @@ bool launchDetached(const QString& program, const QStringList& arguments) {
     return QProcess::startDetached(program, arguments);
 }
 
+bool openUrlExternally(const QUrl& url) {
+    // `open` is always present on macOS and hands the URL to Launch Services.
+    return launchDetached(QStringLiteral("open"), QStringList() << url.toString());
+}
+
+bool registerUriScheme() {
+    // Claim the rpi-imager:// scheme via Launch Services so the browser can
+    // hand the Connect auth token back to us. Requires a bundle identity, so
+    // this is a no-op (returns false) for a plain executable without an
+    // Info.plist (e.g. a unit-test binary).
+    CFBundleRef bundle = CFBundleGetMainBundle();
+    if (!bundle) {
+        return false;
+    }
+    CFStringRef bundleId = static_cast<CFStringRef>(CFBundleGetIdentifier(bundle));
+    if (!bundleId) {
+        return false;
+    }
+    OSStatus status = LSSetDefaultHandlerForURLScheme(CFSTR("rpi-imager"), bundleId);
+    return status == noErr;
+}
+
 bool runElevatedPolicyInstaller() {
     return false;
 }
@@ -389,6 +413,12 @@ bool isScrollInverted(bool qtInvertedFlag) {
     // On macOS, Qt correctly reports the inverted flag in WheelEvent
     // so we just pass through the Qt value.
     return qtInvertedFlag;
+}
+
+bool prefersReducedMotion() {
+    // System Settings > Accessibility > Display > Reduce motion
+    // Available since macOS 10.12 (Sierra).
+    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldReduceMotion];
 }
 
 QString getWriteDevicePath(const QString& devicePath) {
@@ -423,6 +453,13 @@ DiskResult unmountDisk(const QString& device) {
     qDebug() << "unmountDisk: unmounting" << bsdNameBytes.constData();
     
     return runDiskOperation(bsdNameBytes.constData(), unmountCallback);
+}
+
+DiskResult refreshDiskView(const QString& device) {
+    // DiskArbitration handles partition rescans when we close the device, and
+    // re-mounts removable media automatically. Nothing for us to do here.
+    Q_UNUSED(device);
+    return DiskResult::Success;
 }
 
 DiskResult ejectDisk(const QString& device) {

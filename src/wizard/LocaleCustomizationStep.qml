@@ -3,6 +3,8 @@
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -14,15 +16,13 @@ import RpiImager
 WizardStepBase {
     id: root
     
-    required property ImageWriter imageWriter
-    required property var wizardContainer
-    
     title: qsTr("Customisation: Localisation")
     subtitle: qsTr("Select your location for suggested time zone and keyboard layout")
     showSkipButton: true
     nextButtonAccessibleDescription: qsTr("Save localisation settings and continue to next customisation step")
     backButtonAccessibleDescription: qsTr("Return to previous step")
     skipButtonAccessibleDescription: qsTr("Skip all customisation and proceed directly to writing the image")
+    nextButtonEnabled: comboCapitalCity.currentIndex !== -1
 
     // Initial focus will automatically go to title, then subtitle, then first control (handled by WizardStepBase)
     
@@ -33,14 +33,18 @@ WizardStepBase {
     // Initialize the component
     Component.onCompleted: {
         // Load capital cities, timezones and keyboard layout data
-        comboCapitalCity.model = imageWriter.getCapitalCitiesList()
-        comboTimezone.model = imageWriter.getTimezoneList()
-        comboKeyboard.model = imageWriter.getKeymapLayoutList()
-        
-        // Prefill from conserved customization settings; fallback to platform defaults
+        comboCapitalCity.model = ImageWriterSingleton.getCapitalCitiesList()
+        comboTimezone.model = ImageWriterSingleton.getTimezoneList()
+        comboKeyboard.model = ImageWriterSingleton.getKeymapLayoutList()
+
+        // Start with no selection so the user must make an active choice
+        comboCapitalCity.currentIndex = -1
+        comboTimezone.currentIndex = -1
+        comboKeyboard.currentIndex = -1
+
+        // Restore from conserved customization settings only
         var settings = wizardContainer.customizationSettings
-        
-        // Restore saved capital city if available
+
         if (settings.capitalCity) {
             var cityIndex = comboCapitalCity.find(settings.capitalCity)
             if (cityIndex !== -1) {
@@ -50,17 +54,16 @@ WizardStepBase {
                 root.onCapitalCityChanged()
             }
         }
-        
-        var tzToSet = settings.timezone || imageWriter.getTimezone()
-        var tzIndex = comboTimezone.find(tzToSet)
-        if (tzIndex !== -1) comboTimezone.currentIndex = tzIndex
-        else comboTimezone.editText = tzToSet
 
-        var defaultKeyboard = (tzToSet === "Europe/London") ? "gb" : "us"
-        var kbToSet = settings.keyboard || defaultKeyboard
-        var kbIndex = comboKeyboard.find(kbToSet)
-        if (kbIndex !== -1) comboKeyboard.currentIndex = kbIndex
-        else comboKeyboard.editText = kbToSet
+        if (settings.timezone) {
+            var tzIndex = comboTimezone.find(settings.timezone)
+            if (tzIndex !== -1) comboTimezone.currentIndex = tzIndex
+        }
+
+        if (settings.keyboard) {
+            var kbIndex = comboKeyboard.find(settings.keyboard)
+            if (kbIndex !== -1) comboKeyboard.currentIndex = kbIndex
+        }
 
         // Register focus group for locale controls in proper tab order
         // Labels are automatically skipped when screen reader is not active (via activeFocusOnTab)
@@ -76,7 +79,7 @@ WizardStepBase {
         var selectedCity = comboCapitalCity.currentText || comboCapitalCity.editText
         if (!selectedCity || selectedCity.length === 0) return
         
-        var localeData = imageWriter.getLocaleDataForCapital(selectedCity)
+        var localeData = ImageWriterSingleton.getLocaleDataForCapital(selectedCity)
         if (!localeData || Object.keys(localeData).length === 0) return
         
         // Auto-fill timezone if user hasn't manually changed it
@@ -96,7 +99,7 @@ WizardStepBase {
         // Save the recommended WiFi country for later
         if (localeData.countryCode) {
             wizardContainer.customizationSettings.recommendedWifiCountry = localeData.countryCode
-            imageWriter.setPersistedCustomisationSetting("recommendedWifiCountry", localeData.countryCode)
+            ImageWriterSingleton.setPersistedCustomisationSetting("recommendedWifiCountry", localeData.countryCode)
             console.log("LocaleCustomizationStep: Saved recommendedWifiCountry:", localeData.countryCode)
         }
     }
@@ -211,26 +214,26 @@ WizardStepBase {
         // Update conserved customization settings (runtime state)
         if (city.length > 0) {
             wizardContainer.customizationSettings.capitalCity = city
-            imageWriter.setPersistedCustomisationSetting("capitalCity", city)
+            ImageWriterSingleton.setPersistedCustomisationSetting("capitalCity", city)
         } else {
             delete wizardContainer.customizationSettings.capitalCity
-            imageWriter.removePersistedCustomisationSetting("capitalCity")
+            ImageWriterSingleton.removePersistedCustomisationSetting("capitalCity")
         }
         
         if (tz.length > 0) {
             wizardContainer.customizationSettings.timezone = tz
-            imageWriter.setPersistedCustomisationSetting("timezone", tz)
+            ImageWriterSingleton.setPersistedCustomisationSetting("timezone", tz)
         } else {
             delete wizardContainer.customizationSettings.timezone
-            imageWriter.removePersistedCustomisationSetting("timezone")
+            ImageWriterSingleton.removePersistedCustomisationSetting("timezone")
         }
         
         if (kb.length > 0) {
             wizardContainer.customizationSettings.keyboard = kb
-            imageWriter.setPersistedCustomisationSetting("keyboard", kb)
+            ImageWriterSingleton.setPersistedCustomisationSetting("keyboard", kb)
         } else {
             delete wizardContainer.customizationSettings.keyboard
-            imageWriter.removePersistedCustomisationSetting("keyboard")
+            ImageWriterSingleton.removePersistedCustomisationSetting("keyboard")
         }
         
         wizardContainer.localeConfigured = (tz.length > 0 || kb.length > 0)

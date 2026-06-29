@@ -3,10 +3,10 @@
  * Copyright (C) 2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Dialogs
 import QtCore
 import RpiImager
 
@@ -16,8 +16,6 @@ import RpiImager
  */
 ColumnLayout {
     id: root
-    
-    required property ImageWriter imageWriter
     
     // Public API: list of key strings
     property var keys: []
@@ -32,9 +30,33 @@ ColumnLayout {
         if (!text || text.length === 0) return []
         var lines = text.split(/\r?\n/)
         var result = []
+        var puttyKey = ""
         for (var i = 0; i < lines.length; i++) {
             var trimmed = lines[i].trim()
-            if (trimmed.length > 0) {
+            // State 1 of PuTTY key (key begins)
+            if (trimmed.startsWith("---- BEGIN SSH")) {
+                puttyKey = "ssh-rsa " // Add the required prefix
+                continue
+            }
+            // Optional(?) state 2 of PuTTY key (comment)
+            if (puttyKey.length > 0 && trimmed.startsWith("Comment:")) {
+                continue
+            }
+            // Final state (4) of PuTTY key (end of key)
+            if (trimmed.startsWith("---- END SSH")) {
+                // FIXME: put comment text after the key?
+                if (puttyKey.length > 0) {
+                    result.push(puttyKey)
+                }
+                puttyKey = ""
+                continue
+            }
+            // We'll be in state 3 of PuTTY key (the key itself) for a few lines.
+            if (puttyKey.length > 0) {
+                puttyKey += trimmed
+                continue
+            }
+            if (trimmed.length > 0 && puttyKey.length == 0) {
                 result.push(trimmed)
             }
         }
@@ -99,7 +121,7 @@ ColumnLayout {
         Layout.fillWidth: true
         spacing: Style.spacingMedium
         
-        Text {
+        FocusableText {
             id: summaryText
             text: {
                 if (root.keys.length === 0) {
@@ -113,12 +135,7 @@ ColumnLayout {
             font.pointSize: Style.fontSizeFormLabel
             color: Style.formLabelColor
             Layout.fillWidth: true
-            Accessible.role: Accessible.StaticText
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
         }
         
         ImButton {
@@ -168,9 +185,9 @@ ColumnLayout {
                     return qsTr("SSH key %1").arg(index + 1)
                 }
                 Accessible.ignored: false
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                Accessible.focusable: ImageWriterSingleton ? ImageWriterSingleton.screenReaderActive : false
+                focusPolicy: (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) ? Qt.TabFocus : Qt.NoFocus
+                activeFocusOnTab: ImageWriterSingleton ? ImageWriterSingleton.screenReaderActive : false
                 
                 // Key text (truncated for display)
                 Text {
@@ -260,12 +277,12 @@ ColumnLayout {
                         addKeyField.text = ""
                     } else {
                         // Browse for file
-                        if (root.imageWriter.nativeFileDialogAvailable()) {
+                        if (ImageWriterSingleton.nativeFileDialogAvailable()) {
                             var home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
                             var startDir = home && home.length > 0 ? home + "/.ssh" : ""
-                            var picked = root.imageWriter.getNativeOpenFileName(qsTr("Select SSH Public Key"), startDir, CommonStrings.sshFiltersString)
+                            var picked = ImageWriterSingleton.getNativeOpenFileName(qsTr("Select SSH Public Key"), startDir, CommonStrings.sshFiltersString)
                             if (picked && picked.length > 0) {
-                                var contents = root.imageWriter.readFileContents(picked)
+                                var contents = ImageWriterSingleton.readFileContents(picked)
                                 if (contents && contents.length > 0) {
                                     root.addKeysFromFile(contents)
                                 }
@@ -285,7 +302,6 @@ ColumnLayout {
     // File dialog for browsing keys
     ImFileDialog {
         id: browseKeyFileDialog
-        imageWriter: root.imageWriter
         parent: root.parent
         anchors.centerIn: parent
         dialogTitle: qsTr("Select SSH Public Key")
@@ -299,7 +315,7 @@ ColumnLayout {
         onAccepted: {
             if (selectedFile && selectedFile.toString().length > 0) {
                 var filePath = selectedFile.toString().replace(/^file:\/\//, "")
-                var contents = root.imageWriter.readFileContents(filePath)
+                var contents = ImageWriterSingleton.readFileContents(filePath)
                 if (contents && contents.length > 0) {
                     root.addKeysFromFile(contents)
                 }

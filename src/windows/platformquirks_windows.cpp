@@ -4,6 +4,7 @@
  */
 
 #include "../platformquirks.h"
+#include "diskpart_util.h"
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00  // Windows 10 or later
 #endif
@@ -445,6 +446,21 @@ bool launchDetached(const QString& program, const QStringList& arguments) {
     return QProcess::startDetached(program, arguments);
 }
 
+bool openUrlExternally(const QUrl& url) {
+    // Deliberately decline native launching: invoking the URL via cmd /c start
+    // would pass it through the shell, letting metacharacters (&, |, ...) run
+    // arbitrary commands. The caller falls back to QDesktopServices::openUrl,
+    // which opens the URL safely on Windows.
+    Q_UNUSED(url);
+    return false;
+}
+
+bool registerUriScheme() {
+    // The rpi-imager:// scheme association is written to the registry by the
+    // installer at install time, so there is nothing to do at runtime.
+    return true;
+}
+
 bool runElevatedPolicyInstaller() {
     return false;
 }
@@ -477,6 +493,14 @@ bool isScrollInverted(bool qtInvertedFlag) {
     
     // 0 = natural scrolling (invert), 1 = traditional (don't invert)
     return scrollDirection == 0;
+}
+
+bool prefersReducedMotion() {
+    // Windows Settings > Accessibility > Visual effects > Animation effects
+    // SPI_GETCLIENTAREAANIMATION reflects the "Show animations in Windows" toggle.
+    BOOL animationsEnabled = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animationsEnabled, 0);
+    return !animationsEnabled;
 }
 
 QString getWriteDevicePath(const QString& devicePath) {
@@ -688,13 +712,24 @@ DiskResult unmountDisk(const QString& device) {
     return result;
 }
 
+DiskResult refreshDiskView(const QString& device) {
+    auto result = DiskpartUtil::rescanDisk(device.toUtf8());
+    if (result.success) {
+        return DiskResult::Success;
+    }
+    // rescanDisk returns success for paths it doesn't recognise as physical
+    // drives, so a failure here is a genuine IOCTL error.
+    qDebug() << "refreshDiskView: rescan failed for" << device << "-" << result.errorMessage;
+    return DiskResult::Error;
+}
+
 DiskResult ejectDisk(const QString& device) {
     int deviceNumber = parseDeviceNumberImpl(device);
     if (deviceNumber < 0) {
         qDebug() << "ejectDisk: invalid device path" << device;
         return DiskResult::InvalidDrive;
     }
-    
+
     qDebug() << "ejectDisk: ejecting device" << deviceNumber;
     
     // Get all logical drives

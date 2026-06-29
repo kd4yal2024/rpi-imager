@@ -57,12 +57,25 @@ DiskpartResult cleanDiskFast(const QByteArray &device, TimingCallback timingCall
 
 /**
  * Unmount and lock all volumes on a physical drive
- * 
+ *
  * @param device - Windows physical drive path (e.g., "\\\\.\\PHYSICALDRIVE0")
  * @param timingCallback - Optional callback for performance event reporting
  * @return DiskpartResult with success status and error message if failed
  */
 DiskpartResult unmountVolumes(const QByteArray &device, TimingCallback timingCallback = nullptr);
+
+/**
+ * Force Windows to re-read the partition table and re-enumerate volumes on a
+ * physical drive. Used to refresh the OS view of a disk after a raw write
+ * (whether successful or aborted) so that drive letters get reassigned and
+ * Explorer stops showing the disk as missing. Safe to call on a path that
+ * isn't a Windows physical drive — it is a no-op in that case.
+ *
+ * @param device - Windows physical drive path (e.g., "\\\\.\\PHYSICALDRIVE0")
+ * @param timingCallback - Optional callback for performance event reporting
+ * @return DiskpartResult with success status and error message if failed
+ */
+DiskpartResult rescanDisk(const QByteArray &device, TimingCallback timingCallback = nullptr);
 
 } // namespace DiskpartUtil
 

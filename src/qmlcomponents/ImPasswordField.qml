@@ -5,7 +5,6 @@
 
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 import RpiImager
 
 pragma ComponentBehavior: Bound
@@ -52,29 +51,27 @@ Item {
     activeFocusOnTab: true
     focusPolicy: Qt.TabFocus
 
-    // Accessible properties
-    Accessible.role: Accessible.EditableText
-    Accessible.name: textField.placeholderText !== "" ? textField.placeholderText : textField.text
-    Accessible.description: root.accessibleDescription
-    Accessible.editable: true
-    Accessible.focused: textField.activeFocus
-    Accessible.passwordEdit: !passwordVisible
+    // Accessibility lives on the inner ImTextField only. Decorating both the
+    // wrapping Item and the inner field as EditableText creates two
+    // QAccessibleInterfaces for the same control, which has been observed to
+    // crash VoiceOver on macOS during focus transitions (issue #1607).
+    Accessible.ignored: true
 
     ImTextField {
         id: textField
         anchors.fill: parent
         
         // Toggle between password and normal mode
-        echoMode: passwordVisible ? TextInput.Normal : TextInput.Password
+        echoMode: root.passwordVisible ? TextInput.Normal : TextInput.Password
         
         // Make room for the eye icon button
-        rightPadding: eyeToggleVisible ? eyeButton.width + 8 : 12
+        rightPadding: root.eyeToggleVisible ? eyeButton.width + 8 : 12
         
         // Accessibility: update the description when toggle state changes
         Accessible.description: {
             var base = root.accessibleDescription
-            if (eyeToggleVisible) {
-                var toggleHint = passwordVisible 
+            if (root.eyeToggleVisible) {
+                var toggleHint = root.passwordVisible 
                     ? qsTr("Password is visible. Press F2 to hide.")
                     : qsTr("Password is hidden. Press F2 to show.")
                 return base ? base + " " + toggleHint : toggleHint
@@ -84,8 +81,8 @@ Item {
         
         // Handle keyboard shortcut to toggle visibility
         Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_F2 && eyeToggleVisible) {
-                passwordVisible = !passwordVisible
+            if (event.key === Qt.Key_F2 && root.eyeToggleVisible) {
+                root.passwordVisible = !root.passwordVisible
                 event.accepted = true
             }
             // Forward Tab/Shift+Tab navigation to parent Item's KeyNavigation
@@ -117,21 +114,21 @@ Item {
         width: height
         padding: 0
         
-        visible: eyeToggleVisible
-        opacity: eyeToggleVisible ? 1.0 : 0.0
+        visible: root.eyeToggleVisible
+        opacity: root.eyeToggleVisible ? 1.0 : 0.0
         
         // Don't include in normal tab order - use F2 shortcut instead
         // This keeps focus flow simple: tab moves between fields, F2 toggles visibility
         focusPolicy: Qt.NoFocus
         
         Behavior on opacity {
-            NumberAnimation { duration: 150 }
+            NumberAnimation { duration: PlatformHelper.prefersReducedMotion ? 0 : 150 }
         }
         
         // Accessibility
         Accessible.role: Accessible.Button
-        Accessible.name: passwordVisible ? qsTr("Hide password") : qsTr("Show password")
-        Accessible.description: passwordVisible 
+        Accessible.name: root.passwordVisible ? qsTr("Hide password") : qsTr("Show password")
+        Accessible.description: root.passwordVisible 
             ? qsTr("Password is currently visible. Activate to hide it.")
             : qsTr("Password is currently hidden. Activate to show it.")
         
@@ -147,7 +144,7 @@ Item {
             // Fill most of the button, leaving a small margin
             width: eyeButton.width - 4
             height: eyeButton.height - 4
-            source: passwordVisible ? "../icons/ic_eye_hidden_24px.svg" : "../icons/ic_eye_visible_24px.svg"
+            source: root.passwordVisible ? "../icons/ic_eye_hidden_24px.svg" : "../icons/ic_eye_visible_24px.svg"
             fillMode: Image.PreserveAspectFit
             smooth: true
             antialiasing: true
@@ -155,7 +152,7 @@ Item {
         }
         
         onClicked: {
-            passwordVisible = !passwordVisible
+            root.passwordVisible = !root.passwordVisible
             // Return focus to the text field
             textField.forceActiveFocus()
         }

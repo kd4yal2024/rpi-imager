@@ -3,9 +3,13 @@
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.Material
 import QtQuick.Layouts
+import QtQuick.Window
 import "../qmlcomponents"
 
 import RpiImager
@@ -14,9 +18,6 @@ import ImageOptions
 WizardStepBase {
     id: root
     objectName: "writingStep"
-
-    required property ImageWriter imageWriter
-    required property var wizardContainer
 
     title: qsTr("Write image")
     subtitle: {
@@ -31,7 +32,7 @@ WizardStepBase {
     nextButtonText: {
         if (root.isWriting) {
             // Show specific cancel text based on write state
-            if (imageWriter.writeState === ImageWriter.Verifying) {
+            if (ImageWriterSingleton.writeState === ImageWriterSingleton.Verifying) {
                 return qsTr("Skip verification")
             } else {
                 return qsTr("Cancel write")
@@ -44,7 +45,7 @@ WizardStepBase {
     }
     nextButtonAccessibleDescription: {
         if (root.isWriting) {
-            if (imageWriter.writeState === ImageWriter.Verifying) {
+            if (ImageWriterSingleton.writeState === ImageWriterSingleton.Verifying) {
                 return qsTr("Skip verification and finish the write process")
             } else {
                 return qsTr("Cancel the write operation and return to the summary")
@@ -56,19 +57,19 @@ WizardStepBase {
         }
     }
     backButtonAccessibleDescription: qsTr("Return to previous customization step")
-    nextButtonEnabled: root.isWriting || root.isComplete || (!beginWriteDelay.running && imageWriter.readyToWrite())
+    nextButtonEnabled: root.isWriting || root.isComplete || (!beginWriteDelay.running && ImageWriterSingleton.readyToWrite())
     showBackButton: true
 
     readonly property bool isWriting: {
-        var s = imageWriter.writeState
-        return s === ImageWriter.Preparing || s === ImageWriter.Writing ||
-               s === ImageWriter.Verifying || s === ImageWriter.Finalizing ||
-               s === ImageWriter.Cancelling
+        var s = ImageWriterSingleton.writeState
+        return s === ImageWriterSingleton.Preparing || s === ImageWriterSingleton.Writing ||
+               s === ImageWriterSingleton.Verifying || s === ImageWriterSingleton.Finalizing ||
+               s === ImageWriterSingleton.Cancelling
     }
-    readonly property bool isVerifying: imageWriter.writeState === ImageWriter.Verifying
-    readonly property bool isCancelling: imageWriter.writeState === ImageWriter.Cancelling
-    readonly property bool isFinalising: imageWriter.writeState === ImageWriter.Finalizing
-    readonly property bool isComplete: imageWriter.writeState === ImageWriter.Succeeded
+    readonly property bool isVerifying: ImageWriterSingleton.writeState === ImageWriterSingleton.Verifying
+    readonly property bool isCancelling: ImageWriterSingleton.writeState === ImageWriterSingleton.Cancelling
+    readonly property bool isFinalising: ImageWriterSingleton.writeState === ImageWriterSingleton.Finalizing
+    readonly property bool isComplete: ImageWriterSingleton.writeState === ImageWriterSingleton.Succeeded
     property string bottleneckStatus: ""
     property int writeThroughputKBps: 0
     property string operationWarning: ""  // Non-fatal warning message (e.g., sync fallback)
@@ -108,7 +109,7 @@ WizardStepBase {
             spacing: Style.spacingMedium
             visible: !root.isWriting && !root.isComplete
 
-            Text {
+            FocusableHeading {
                 id: summaryHeading
                 text: qsTr("Summary")
                 font.pointSize: Style.fontSizeHeading
@@ -116,11 +117,6 @@ WizardStepBase {
                 font.bold: true
                 color: Style.formLabelColor
                 Layout.fillWidth: true
-                Accessible.role: Accessible.Heading
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
 
             GridLayout {
@@ -130,22 +126,18 @@ WizardStepBase {
                 columnSpacing: Style.formColumnSpacing
                 rowSpacing: Style.spacingSmall
 
-                Text {
+                FocusableText {
                     id: deviceLabel
                     text: CommonStrings.device
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + ": " + (wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + ": " + (root.wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected)
                 }
 
                 MarqueeText {
                     id: deviceValue
-                    text: wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected
+                    text: root.wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -154,22 +146,18 @@ WizardStepBase {
                     Accessible.ignored: true  // Read as part of the label
                 }
 
-                Text {
+                FocusableText {
                     id: osLabel
                     text: qsTr("Operating system:")
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + " " + (wizardContainer.selectedOsName || CommonStrings.noImageSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + " " + (root.wizardContainer.selectedOsName || CommonStrings.noImageSelected)
                 }
 
                 MarqueeText {
                     id: osValue
-                    text: wizardContainer.selectedOsName || CommonStrings.noImageSelected
+                    text: root.wizardContainer.selectedOsName || CommonStrings.noImageSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -178,22 +166,18 @@ WizardStepBase {
                     Accessible.ignored: true  // Read as part of the label
                 }
 
-                Text {
+                FocusableText {
                     id: storageLabel
                     text: CommonStrings.storage
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + ": " + (wizardContainer.selectedStorageName || CommonStrings.noStorageSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + ": " + (root.wizardContainer.selectedStorageName || CommonStrings.noStorageSelected)
                 }
 
                 MarqueeText {
                     id: storageValue
-                    text: wizardContainer.selectedStorageName || CommonStrings.noStorageSelected
+                    text: root.wizardContainer.selectedStorageName || CommonStrings.noStorageSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -213,7 +197,7 @@ WizardStepBase {
             spacing: Style.spacingMedium
             visible: !root.isWriting && !root.isComplete && root.anyCustomizationsApplied
 
-            Text {
+            FocusableHeading {
                 id: customizationsHeading
                 text: qsTr("Customisations to apply:")
                 font.pointSize: Style.fontSizeHeading
@@ -221,11 +205,6 @@ WizardStepBase {
                 font.bold: true
                 color: Style.formLabelColor
                 Layout.fillWidth: true
-                Accessible.role: Accessible.Heading
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
 
             ScrollView {
@@ -240,18 +219,18 @@ WizardStepBase {
                 Accessible.name: {
                     // Build a list of visible customizations to announce
                     var items = []
-                    if (wizardContainer.hostnameConfigured) items.push(CommonStrings.hostnameConfigured)
-                    if (wizardContainer.localeConfigured) items.push(CommonStrings.localeConfigured)
-                    if (wizardContainer.userConfigured) items.push(CommonStrings.userAccountConfigured)
-                    if (wizardContainer.wifiConfigured) items.push(CommonStrings.wifiConfigured)
-                    if (wizardContainer.provisioningConfigured) items.push(qsTr("Provisioning"))
-                    if (wizardContainer.sshEnabled) items.push(CommonStrings.sshEnabled)
-                    if (wizardContainer.piConnectEnabled) items.push(CommonStrings.piConnectEnabled)
-                    if (wizardContainer.featUsbGadgetEnabled) items.push(CommonStrings.usbGadgetEnabled)
-                    if (wizardContainer.ifI2cEnabled) items.push(CommonStrings.i2cEnabled)
-                    if (wizardContainer.ifSpiEnabled) items.push(CommonStrings.spiEnabled)
-                    if (wizardContainer.if1WireEnabled) items.push(CommonStrings.onewireEnabled)
-                    if (wizardContainer.ifSerial !== "" && wizardContainer.ifSerial !== "Disabled") items.push(CommonStrings.serialConfigured)
+                    if (root.wizardContainer.hostnameConfigured) items.push(CommonStrings.hostnameConfigured)
+                    if (root.wizardContainer.localeConfigured) items.push(CommonStrings.localeConfigured)
+                    if (root.wizardContainer.userConfigured) items.push(CommonStrings.userAccountConfigured)
+                    if (root.wizardContainer.wifiConfigured) items.push(CommonStrings.wifiConfigured)
+                    if (root.wizardContainer.provisioningConfigured) items.push(qsTr("Provisioning"))
+                    if (root.wizardContainer.sshEnabled) items.push(CommonStrings.sshEnabled)
+                    if (root.wizardContainer.piConnectEnabled) items.push(CommonStrings.piConnectEnabled)
+                    if (root.wizardContainer.featUsbGadgetEnabled) items.push(CommonStrings.usbGadgetEnabled)
+                    if (root.wizardContainer.ifI2cEnabled) items.push(CommonStrings.i2cEnabled)
+                    if (root.wizardContainer.ifSpiEnabled) items.push(CommonStrings.spiEnabled)
+                    if (root.wizardContainer.if1WireEnabled) items.push(CommonStrings.onewireEnabled)
+                    if (root.wizardContainer.ifSerial !== "" && root.wizardContainer.ifSerial !== "Disabled") items.push(CommonStrings.serialConfigured)
                     
                     return items.length + " " + (items.length === 1 ? qsTr("customization") : qsTr("customizations")) + ": " + items.join(", ")
                 }
@@ -277,18 +256,18 @@ WizardStepBase {
                         id: customizationsColumn
                         width: parent.width
                         spacing: Style.spacingXSmall
-                        Text { text: "• " + CommonStrings.hostnameConfigured;      font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.hostnameConfigured;         Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.localeConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.localeConfigured;           Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.userAccountConfigured;   font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.userConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.wifiConfigured;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.wifiConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + qsTr("Provisioning");                  font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.provisioningConfigured;     Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.sshEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.sshEnabled;                 Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.piConnectEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.piConnectEnabled;           Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.usbGadgetEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.featUsbGadgetEnabled;       Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.i2cEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifI2cEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.spiEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSpiEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.onewireEnabled;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.if1WireEnabled;             Accessible.role: Accessible.ListItem; Accessible.name: text }
-                        Text { text: "• " + CommonStrings.serialConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: wizardContainer.ifSerial !== "" && wizardContainer.ifSerial !== "Disabled"; Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.hostnameConfigured;      font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.hostnameConfigured;         Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.localeConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.localeConfigured;           Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.userAccountConfigured;   font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.userConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.wifiConfigured;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.wifiConfigured;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + qsTr("Provisioning");                  font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.provisioningConfigured;     Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.sshEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.sshEnabled;                 Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.piConnectEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.piConnectEnabled;           Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.usbGadgetEnabled;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.featUsbGadgetEnabled;       Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.i2cEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.ifI2cEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.spiEnabled;              font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.ifSpiEnabled;               Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.onewireEnabled;          font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.if1WireEnabled;             Accessible.role: Accessible.ListItem; Accessible.name: text }
+                        Text { text: "• " + CommonStrings.serialConfigured;        font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor;     visible: root.wizardContainer.ifSerial !== "" && root.wizardContainer.ifSerial !== "Disabled"; Accessible.role: Accessible.ListItem; Accessible.name: text }
                     }
                 }
                 ScrollBar.vertical: ScrollBar {
@@ -307,7 +286,7 @@ WizardStepBase {
             spacing: Style.spacingMedium
             visible: root.isWriting || root.isComplete
 
-            Text {
+            FocusableText {
                 id: progressText
                 text: qsTr("Starting write process...")
                 font.pointSize: Style.fontSizeHeading
@@ -317,10 +296,6 @@ WizardStepBase {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 Accessible.role: Accessible.StatusBar
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
 
             ProgressBar {
@@ -331,6 +306,7 @@ WizardStepBase {
                 from: 0
                 to: 100
                 indeterminate: root.isIndeterminateProgress && !root.isVerifying && !root.isFinalising
+                               && !PlatformHelper.prefersReducedMotion
 
                 Material.accent: Style.progressBarVerifyForegroundColor
                 Material.background: Style.progressBarBackgroundColor
@@ -383,13 +359,13 @@ WizardStepBase {
     onNextClicked: {
         if (root.isWriting) {
             // If we're in verification phase, skip verification and let write complete successfully
-            if (imageWriter.writeState === ImageWriter.Verifying) {
-                imageWriter.skipCurrentVerification()
+            if (ImageWriterSingleton.writeState === ImageWriterSingleton.Verifying) {
+                ImageWriterSingleton.skipCurrentVerification()
             } else {
                 // Cancel the actual write operation
                 progressBar.value = 100
                 progressText.text = qsTr("Finalising…")
-                imageWriter.cancelWrite()
+                ImageWriterSingleton.cancelWrite()
             }
         } else if (!root.isComplete) {
             // If warnings are disabled, skip the confirmation dialog
@@ -413,7 +389,6 @@ WizardStepBase {
     // Confirmation dialog
     BaseDialog {
         id: confirmDialog
-        imageWriter: root.imageWriter
         parent: root.Window.window ? root.Window.window.overlayRootItem : undefined
         anchors.centerIn: parent
 
@@ -432,7 +407,7 @@ WizardStepBase {
         Component.onCompleted: {
             registerFocusGroup("warning", function(){ 
                 // Only include warning texts when screen reader is active (otherwise they're not focusable)
-                if (confirmDialog.imageWriter && confirmDialog.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     return [warningText, permanentText]
                 }
                 return []
@@ -446,10 +421,11 @@ WizardStepBase {
         onOpened: {
             // If a screen reader is active, bypass the timer - screen reader users
             // need time to hear the content, not wait for a visual countdown
-            if (confirmDialog.imageWriter && confirmDialog.imageWriter.isScreenReaderActive()) {
+            if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                 allowAccept = true
                 countdown = 0
                 rebuildFocusOrder()
+                focusInitialItem()
             } else {
                 allowAccept = false
                 countdown = 2
@@ -463,24 +439,19 @@ WizardStepBase {
         }
 
         // Dialog content - now using BaseDialog's contentLayout
-        Text {
+        FocusableHeading {
             id: warningText
-            text: qsTr("You are about to ERASE all data on: %1").arg(wizardContainer.selectedStorageName || qsTr("the storage device"))
+            text: qsTr("You are about to ERASE all data on: %1").arg(root.wizardContainer.selectedStorageName || qsTr("the storage device"))
             font.pointSize: Style.fontSizeHeading
             font.family: Style.fontFamilyBold
             font.bold: true
             color: Style.formLabelErrorColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.Heading
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: confirmDialog.imageWriter ? confirmDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (confirmDialog.imageWriter && confirmDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: confirmDialog.imageWriter ? confirmDialog.imageWriter.isScreenReaderActive() : false
         }
 
-        Text {
+        FocusableText {
             id: permanentText
             text: qsTr("This action is PERMANENT and CANNOT be undone.")
             font.pointSize: Style.fontSizeFormLabel
@@ -488,12 +459,7 @@ WizardStepBase {
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.StaticText
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: confirmDialog.imageWriter ? confirmDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (confirmDialog.imageWriter && confirmDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: confirmDialog.imageWriter ? confirmDialog.imageWriter.isScreenReaderActive() : false
         }
 
         Text {
@@ -552,8 +518,10 @@ WizardStepBase {
             if (confirmDialog.countdown <= 0) {
                 confirmDelay.stop()
                 confirmDialog.allowAccept = true
-                // Rebuild focus order now that buttons are visible
+                // Rebuild focus order now that buttons are visible, then move
+                // focus onto Cancel so Tab/Enter work without a mouse click.
                 confirmDialog.rebuildFocusOrder()
+                confirmDialog.focusInitialItem()
             }
         }
     }
@@ -572,10 +540,10 @@ WizardStepBase {
             root.writeThroughputKBps = 0
             root.operationWarning = ""
             // Check if extract size is known upfront (e.g., gz files can't reliably store sizes >4GB)
-            root.isIndeterminateProgress = !imageWriter.isExtractSizeKnown()
+            root.isIndeterminateProgress = !ImageWriterSingleton.isExtractSizeKnown()
             progressText.text = qsTr("Starting write process...")
             progressBar.value = 0
-            imageWriter.startWrite()
+            ImageWriterSingleton.startWrite()
         }
     }
 
@@ -615,12 +583,12 @@ WizardStepBase {
 
     // Update isWriting state when write completes
     Connections {
-        target: imageWriter
+        target: ImageWriterSingleton
         function onSuccess() {
             progressText.text = qsTr("Write completed successfully!")
 
             // Automatically advance to the done screen
-            wizardContainer.nextStep()
+            root.wizardContainer.nextStep()
         }
         function onError(msg) {
             progressText.text = qsTr("Write failed: %1").arg(msg)
@@ -654,7 +622,7 @@ WizardStepBase {
             var items = []
             if (summaryLayout.visible) {
                 // Only include text labels when screen reader is active
-                if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     items.push(summaryHeading)
                     items.push(deviceLabel)
                     items.push(osLabel)
@@ -669,7 +637,7 @@ WizardStepBase {
             var items = []
             if (customLayout.visible) {
                 // Only include heading when screen reader is active; always include scroll view
-                if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     items.push(customizationsHeading)
                 }
                 items.push(customizationsScrollView)
@@ -682,7 +650,7 @@ WizardStepBase {
             var items = []
             if (progressLayout.visible) {
                 // Only include progress text when screen reader is active
-                if (root.imageWriter && root.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     items.push(progressText)
                 }
                 // Always include progress bar when visible (during writing)

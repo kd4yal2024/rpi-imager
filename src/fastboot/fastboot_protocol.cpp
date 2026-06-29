@@ -64,22 +64,36 @@ Response FastbootProtocol::sendCommand(rpiboot::IUsbTransport& transport,
                                         std::string_view command,
                                         int timeoutMs)
 {
+    return sendCommandCapture(transport, command, timeoutMs).terminal;
+}
+
+FastbootProtocol::CaptureResult FastbootProtocol::sendCommandCapture(
+    rpiboot::IUsbTransport& transport,
+    std::string_view command,
+    int timeoutMs)
+{
+    CaptureResult result;
+
     // Send command as ASCII via bulk OUT
     auto data = std::span<const uint8_t>(
         reinterpret_cast<const uint8_t*>(command.data()), command.size());
 
     int written = transport.bulkWrite(EP_OUT, data, timeoutMs);
     if (written < 0) {
-        return {Response::Fail, "Failed to send command", 0};
+        result.terminal = {Response::Fail, "Failed to send command", 0};
+        return result;
     }
 
-    // Read responses -- INFO/TEXT are intermediate, keep reading until OKAY/FAIL/DATA
+    // Read responses -- INFO/TEXT are intermediate; collect them and keep
+    // reading until a terminal OKAY/FAIL/DATA response is received.
     for (;;) {
         auto resp = readResponse(transport, timeoutMs);
-        if (resp.type != Response::Info && resp.type != Response::Text) {
-            return resp;
+        if (resp.type == Response::Info || resp.type == Response::Text) {
+            result.infoLines.push_back(resp.message);
+            continue;
         }
-        // INFO/TEXT: continue reading for the terminal response
+        result.terminal = resp;
+        return result;
     }
 }
 
@@ -99,12 +113,16 @@ bool FastbootProtocol::sendData(rpiboot::IUsbTransport& transport,
 
     // Send "<prefix>:<size-hex>"
     char cmd[64];
-    snprintf(cmd, sizeof(cmd), "%.*s:%08x",
+    int cmdLen = snprintf(cmd, sizeof(cmd), "%.*s:%08x",
              static_cast<int>(commandPrefix.size()), commandPrefix.data(),
              static_cast<unsigned>(data.size()));
+    if (cmdLen < 0 || static_cast<size_t>(cmdLen) >= sizeof(cmd)) {
+        _lastError = "Command prefix too long for fastboot protocol buffer";
+        return false;
+    }
 
     auto cmdSpan = std::span<const uint8_t>(
-        reinterpret_cast<const uint8_t*>(cmd), std::strlen(cmd));
+        reinterpret_cast<const uint8_t*>(cmd), static_cast<size_t>(cmdLen));
     int written = transport.bulkWrite(EP_OUT, cmdSpan, 3000);
     if (written < 0) {
         _lastError = std::string("Failed to send ") + std::string(commandPrefix) + " command";
@@ -164,7 +182,7 @@ bool FastbootProtocol::stage(rpiboot::IUsbTransport& transport,
                               rpiboot::ProgressCallback progress,
                               std::atomic<bool>& cancelled)
 {
-    return sendData(transport, "stage", data, progress, cancelled);
+    return sendData(transport, "download", data, progress, cancelled);
 }
 
 // ── Upload (device → host) ────────────────────────────────────────────
@@ -234,6 +252,36 @@ std::vector<uint8_t> FastbootProtocol::upload(rpiboot::IUsbTransport& transport,
     return result;
 }
 
+// ── Device mount/umount ─────────────────────────────────────────────
+
+bool FastbootProtocol::mountDevice(rpiboot::IUsbTransport& transport,
+                                    std::string_view device,
+                                    std::string_view mountpoint,
+                                    std::string_view fstype)
+{
+    std::string cmd = "oem mount " + std::string(device) + " " + std::string(mountpoint);
+    if (!fstype.empty())
+        cmd += " " + std::string(fstype);
+
+    auto resp = sendCommand(transport, cmd, 30000);
+    if (resp.type != Response::Okay) {
+        _lastError = "oem mount failed: " + resp.message;
+        return false;
+    }
+    return true;
+}
+
+bool FastbootProtocol::umountDevice(rpiboot::IUsbTransport& transport,
+                                     std::string_view mountpoint)
+{
+    auto resp = sendCommand(transport, "oem umount " + std::string(mountpoint), 30000);
+    if (resp.type != Response::Okay) {
+        _lastError = "oem umount failed: " + resp.message;
+        return false;
+    }
+    return true;
+}
+
 // ── Device file transfer convenience methods ──────────────────────────
 
 bool FastbootProtocol::writeDeviceFile(rpiboot::IUsbTransport& transport,
@@ -271,6 +319,86 @@ std::vector<uint8_t> FastbootProtocol::readDeviceFile(rpiboot::IUsbTransport& tr
     }
 
     return upload(transport, nullptr, cancelled);
+}
+
+// ── EEPROM ─────────────────────────────────────────────────────────────
+
+namespace {
+// SPI flash write of a Pi5 (2 MiB) EEPROM completes well under a
+// minute in practice; allow several to absorb retries / slow chips.
+constexpr int EEPROM_OP_TIMEOUT_MS = 5 * 60 * 1000;
+} // namespace
+
+bool FastbootProtocol::updateEeprom(rpiboot::IUsbTransport& transport,
+                                     std::span<const uint8_t> image,
+                                     std::string_view spidev,
+                                     rpiboot::ProgressCallback progress,
+                                     std::atomic<bool>& cancelled)
+{
+    _lastError.clear();
+
+    if (!download(transport, image, progress, cancelled))
+        return false;
+
+    std::string cmd = "oem eeprom-update";
+    if (!spidev.empty()) {
+        cmd += ' ';
+        cmd.append(spidev);
+    }
+
+    auto resp = sendCommand(transport, cmd, EEPROM_OP_TIMEOUT_MS);
+    if (resp.type != Response::Okay) {
+        _lastError = "oem eeprom-update failed: " + resp.message;
+        return false;
+    }
+    return true;
+}
+
+bool FastbootProtocol::verifyEeprom(rpiboot::IUsbTransport& transport,
+                                     std::span<const uint8_t> image,
+                                     std::string_view spidev,
+                                     rpiboot::ProgressCallback progress,
+                                     std::atomic<bool>& cancelled)
+{
+    _lastError.clear();
+
+    if (!download(transport, image, progress, cancelled))
+        return false;
+
+    std::string cmd = "oem eeprom-verify";
+    if (!spidev.empty()) {
+        cmd += ' ';
+        cmd.append(spidev);
+    }
+
+    auto resp = sendCommand(transport, cmd, EEPROM_OP_TIMEOUT_MS);
+    if (resp.type != Response::Okay) {
+        _lastError = "oem eeprom-verify failed: " + resp.message;
+        return false;
+    }
+    return true;
+}
+
+std::vector<uint8_t> FastbootProtocol::readEeprom(rpiboot::IUsbTransport& transport,
+                                                   std::string_view spidev,
+                                                   rpiboot::ProgressCallback progress,
+                                                   std::atomic<bool>& cancelled)
+{
+    _lastError.clear();
+
+    std::string cmd = "oem eeprom-read";
+    if (!spidev.empty()) {
+        cmd += ' ';
+        cmd.append(spidev);
+    }
+
+    auto resp = sendCommand(transport, cmd, EEPROM_OP_TIMEOUT_MS);
+    if (resp.type != Response::Okay) {
+        _lastError = "oem eeprom-read failed: " + resp.message;
+        return {};
+    }
+
+    return upload(transport, progress, cancelled);
 }
 
 // ── Flash ──────────────────────────────────────────────────────────────

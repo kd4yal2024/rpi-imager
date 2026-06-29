@@ -14,9 +14,7 @@ import RpiImager
 Item {
     id: root
     
-    required property ImageWriter imageWriter
     property int sidebarWidthValue: Style.sidebarWidth
-    property var optionsPopup: null
     // Show landing language selection step at startup
     property bool showLanguageSelection: false
     // Reference to the full-window overlay root for dialog parenting
@@ -26,7 +24,7 @@ Item {
     
     // Track whether we have network connectivity (derived from OS list availability)
     // This updates reactively when OS list becomes available after a retry
-    readonly property bool hasNetworkConnectivity: !imageWriter.isOsListUnavailable
+    readonly property bool hasNetworkConnectivity: !ImageWriterSingleton.isOsListUnavailable
     
     // Current wizard step - initialized in Component.onCompleted based on network state.
     // NOT a binding, so it won't auto-change when hasNetworkConnectivity changes.
@@ -40,10 +38,10 @@ Item {
     
     // Track writing state — derived from the C++ state machine
     readonly property bool isWriting: {
-        var s = imageWriter.writeState
-        return s === ImageWriter.Preparing || s === ImageWriter.Writing ||
-               s === ImageWriter.Verifying || s === ImageWriter.Finalizing ||
-               s === ImageWriter.Cancelling
+        var s = ImageWriterSingleton.writeState
+        return s === ImageWriterSingleton.Preparing || s === ImageWriterSingleton.Writing ||
+               s === ImageWriterSingleton.Verifying || s === ImageWriterSingleton.Finalizing ||
+               s === ImageWriterSingleton.Cancelling
     }
     
     // Track if we're in "write another" flow (skip to writing step after storage selection)
@@ -72,6 +70,18 @@ Item {
     property bool piConnectEnabled: false
     // Whether selected OS supports Raspberry Raspberry Pi Connect customization
     property bool piConnectAvailable: false
+    // Whether the current write target is a fastboot storage device.
+    // Set by StorageSelectionStep on selection; consumed by the
+    // Pi Connect customisation step to choose between device-identity
+    // registration (fastboot) and auth-key minting (everything else).
+    property bool targetIsFastboot: false
+
+    // Raspberry Pi Connect for Organisations — session-only credentials.
+    // Held in the wizard container (never persisted) so they survive
+    // step navigation within a session.  Copied into ImageWriter on
+    // Next so they are available to the fastboot flash thread.
+    property string connectOrgApiKey: ""
+    property string connectOrgDescription: ""
     // Whether selected OS supports Secure Boot signing
     property bool secureBootAvailable: false
     // Whether selected OS supports passwordless sudo configuration
@@ -137,6 +147,9 @@ Item {
     
     signal wizardCompleted()
     signal updatePopupRequested(url updateUrl, string version)
+    // Emitted when the user clicks "App Options". main.qml owns the dialog and
+    // constructs it lazily on first request, so it stays off the startup path.
+    signal appOptionsRequested()
     
     // Focus anchor for global keyboard navigation
     Item {
@@ -175,21 +188,21 @@ Item {
         }
         
         // Default to disabling warnings in embedded mode (per-run, non-persistent)
-        if (imageWriter && imageWriter.isEmbeddedMode()) {
+        if (ImageWriterSingleton && ImageWriterSingleton.isEmbeddedMode()) {
             disableWarnings = true
         }
         
         // Initialize customizationSettings from persistent storage
         // Each step can then read from this and update it as needed
-        if (imageWriter) {
-            customizationSettings = imageWriter.getSavedCustomisationSettings()
+        if (ImageWriterSingleton) {
+            customizationSettings = ImageWriterSingleton.getSavedCustomisationSettings()
 
             // Check if secure boot RSA key is configured
-            var rsaKeyPath = imageWriter.getStringSetting("secureboot_rsa_key")
+            var rsaKeyPath = ImageWriterSingleton.getStringSetting("secureboot_rsa_key")
             secureBootKeyConfigured = (rsaKeyPath && rsaKeyPath.length > 0)
 
             // Restore persisted sidebar width
-            var savedWidth = imageWriter.getStringSetting("sidebarWidth")
+            var savedWidth = ImageWriterSingleton.getStringSetting("sidebarWidth")
             if (savedWidth) {
                 sidebarWidthValue = clampSidebarWidth(parseInt(savedWidth))
             }
@@ -198,7 +211,7 @@ Item {
     
     // Handle OS list availability changes
     Connections {
-        target: imageWriter
+        target: ImageWriterSingleton
         function onOsListUnavailableChanged() {
             // When OS list becomes available after starting offline, navigate to device
             // selection so the user can choose their target device (now that the list is available).
@@ -234,8 +247,8 @@ Item {
     }
 
     function saveSidebarWidth(width) {
-        if (imageWriter) {
-            imageWriter.setSetting("sidebarWidth", width.toString())
+        if (ImageWriterSingleton) {
+            ImageWriterSingleton.setSetting("sidebarWidth", width.toString())
         }
     }
 
@@ -305,7 +318,7 @@ Item {
         if (stepLabel === qsTr("Remote access")) return sshEnabled
         if (stepLabel === qsTr("Secure Boot")) return secureBootEnabled
         if (stepLabel === qsTr("Raspberry Pi Connect")) return piConnectEnabled
-        if (stepLabel === qsTr("Interfaces & Features")) return (ifI2cEnabled || ifSpiEnabled || if1WireEnabled || ifSerial !== "" || featUsbGadgetEnabled)
+        if (stepLabel === qsTr("Interfaces & Features")) return (ifI2cEnabled || ifSpiEnabled || if1WireEnabled || (ifSerial !== "" && ifSerial !== "Disabled") || featUsbGadgetEnabled)
         
         return false
     }
@@ -384,7 +397,6 @@ Item {
         ifSerial = ""
         featUsbGadgetEnabled = false
     }
-
 
     // Map sidebar index back to the first wizard step in that group
     function getWizardStepFromSidebarIndex(sidebarIndex) {
@@ -502,7 +514,7 @@ Item {
                             color: stepItem.index === root.getSidebarIndex(root.currentStep) ? Style.sidebarActiveBackgroundColor : Style.transparent
                             border.color: stepItem.index === root.getSidebarIndex(root.currentStep) ? Style.sidebarActiveBackgroundColor : Style.transparent
                             border.width: 1
-                            radius: root.imageWriter.isEmbeddedMode() ? Style.sidebarItemBorderRadiusEmbedded : Style.sidebarItemBorderRadius
+                            radius: Style.cornerRadius(Style.sidebarItemBorderRadius)
                             antialiasing: true  // Smooth edges at non-integer scale factors
                             clip: true  // Prevent content overflow at non-integer scale factors
 
@@ -562,7 +574,7 @@ Item {
                                     required property var modelData
                                     width: sublistContainer ? sublistContainer.width : 0
                                     height: Style.sidebarSubItemHeight
-                                    radius: root.imageWriter.isEmbeddedMode() ? Style.sidebarItemBorderRadiusEmbedded : Style.sidebarItemBorderRadius
+                                    radius: Style.cornerRadius(Style.sidebarItemBorderRadius)
                                     color: Style.transparent
                                     border.color: Style.transparent
                                     border.width: 0
@@ -693,17 +705,7 @@ Item {
                     text: qsTr("App Options")
                     accessibleDescription: qsTr("Open application settings to configure sound alerts, auto-eject, telemetry, and content repository")
                     activeFocusOnTab: true
-                    onClicked: {
-                        if (root.optionsPopup) {
-                            if (!root.optionsPopup.wizardContainer) {
-                                root.optionsPopup.wizardContainer = root
-                            }
-                            // TODO: actually duplicate
-                            // as onOpen in it already calls initialize()
-                            root.optionsPopup.initialize()
-                            root.optionsPopup.open()
-                        }
-                    }
+                    onClicked: root.appOptionsRequested()
                 }
             }
         }
@@ -722,14 +724,14 @@ Item {
                 width: 1
                 height: parent.height * 0.75
                 color: dragHandle.isActive ? Style.sidebarDragHandleHoverColor : Style.titleSeparatorColor
-                Behavior on color { ColorAnimation { duration: 150 } }
+                Behavior on color { ColorAnimation { duration: PlatformHelper.prefersReducedMotion ? 0 : 150 } }
             }
 
             // Hover/drag highlight background
             Rectangle {
                 anchors.fill: parent
                 color: dragHandle.isActive ? Style.sidebarDragHandleHoverBackground : "transparent"
-                Behavior on color { ColorAnimation { duration: 150 } }
+                Behavior on color { ColorAnimation { duration: PlatformHelper.prefersReducedMotion ? 0 : 150 } }
             }
 
             MouseArea {
@@ -782,34 +784,34 @@ Item {
                     property: "opacity"
                     from: 0
                     to: 1
-                    duration: 250
+                    duration: PlatformHelper.prefersReducedMotion ? 0 : 250
                 }
             }
-            
+
             pushExit: Transition {
                 PropertyAnimation {
                     property: "opacity"
                     from: 1
                     to: 0
-                    duration: 250
+                    duration: PlatformHelper.prefersReducedMotion ? 0 : 250
                 }
             }
-            
+
             popEnter: Transition {
                 PropertyAnimation {
                     property: "opacity"
                     from: 0
                     to: 1
-                    duration: 250
+                    duration: PlatformHelper.prefersReducedMotion ? 0 : 250
                 }
             }
-            
+
             popExit: Transition {
                 PropertyAnimation {
                     property: "opacity"
                     from: 1
                     to: 0
-                    duration: 250
+                    duration: PlatformHelper.prefersReducedMotion ? 0 : 250
                 }
             }
             
@@ -835,9 +837,10 @@ Item {
     function nextStep() {
         if (root.currentStep < root.totalSteps - 1) {
             var nextIndex = root.currentStep + 1
+            var replayPreviousWrite = writeAnotherMode && root.currentStep === stepStorageSelection
             
             // Special handling for "write another" mode: skip directly to writing step after storage selection
-            if (writeAnotherMode && root.currentStep === stepStorageSelection) {
+            if (replayPreviousWrite) {
                 nextIndex = stepWriting
                 writeAnotherMode = false  // Reset the flag
             }
@@ -859,13 +862,16 @@ Item {
             }
             // Before entering the writing step, apply customization (when supported)
             if (nextIndex === stepWriting) {
-                if (customizationSupported && imageWriter) {
+                if (customizationSupported && ImageWriterSingleton && !replayPreviousWrite) {
                     // Pass session flags so the generator can skip unconfigured sections
                     customizationSettings.wifiConfigured = wifiConfigured
                     // Pass the complete customizationSettings object directly to the generator
                     // This includes both persistent settings (hostname, wifi, etc.) and
                     // ephemeral settings (piConnectEnabled) from the current wizard session
-                    imageWriter.applyCustomisationFromSettings(customizationSettings)
+                    ImageWriterSingleton.applyCustomisationFromSettings(customizationSettings)
+                } else if (replayPreviousWrite) {
+                    // Reuse the exact customisation payload staged for the previous write.
+                    // Regenerating from saved settings can re-apply customisations the user skipped.
                 }
                 
                 // Capture snapshot of customization flags at write summary stage
@@ -974,7 +980,6 @@ Item {
     Component {
         id: languageSelectionStep
         LanguageSelectionStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: {
@@ -991,7 +996,6 @@ Item {
     Component {
         id: deviceSelectionStep
         DeviceSelectionStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             showBackButton: false
             appOptionsButton: optionsButton
@@ -1002,7 +1006,6 @@ Item {
     Component {
         id: osSelectionStep
         OSSelectionStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             // Hide back button when offline (device selection was skipped)
             showBackButton: root.hasNetworkConnectivity
@@ -1016,7 +1019,6 @@ Item {
     Component {
         id: storageSelectionStep
         StorageSelectionStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1027,7 +1029,6 @@ Item {
     Component {
         id: hostnameCustomizationStep
         HostnameCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1041,7 +1042,6 @@ Item {
     Component {
         id: localeCustomizationStep
         LocaleCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1055,7 +1055,6 @@ Item {
     Component {
         id: userCustomizationStep
         UserCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1069,6 +1068,19 @@ Item {
     Component {
         id: wifiCustomizationStep
         WifiCustomizationStep {
+            wizardContainer: root
+            appOptionsButton: optionsButton
+            onNextClicked: root.nextStep()
+            onBackClicked: root.previousStep()
+            onSkipClicked: {
+                // Skip functionality is handled in the step itself
+            }
+        }
+    }
+
+    Component {
+        id: provisioningCustomizationStep
+        ProvisioningCustomizationStep {
             imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
@@ -1097,7 +1109,6 @@ Item {
     Component {
         id: remoteAccessStep
         RemoteAccessStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1111,7 +1122,6 @@ Item {
     Component {
         id: secureBootCustomizationStep
         SecureBootCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: root.nextStep()
@@ -1125,7 +1135,6 @@ Item {
     Component {
         id: piConnectCustomizationStep
         PiConnectCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: {
@@ -1145,7 +1154,6 @@ Item {
     Component {
         id: ifAndFeaturesStep
         IfAndFeaturesCustomizationStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             appOptionsButton: optionsButton
             onNextClicked: {
@@ -1165,7 +1173,6 @@ Item {
     Component {
         id: writingStep
         WritingStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             showBackButton: true
             appOptionsButton: optionsButton
@@ -1184,7 +1191,6 @@ Item {
     Component {
         id: doneStep
         DoneStep {
-            imageWriter: root.imageWriter
             wizardContainer: root
             showBackButton: false
             nextButtonText: CommonStrings.finish
@@ -1196,7 +1202,6 @@ Item {
     // Token conflict dialog — based on your BaseDialog pattern
     BaseDialog {
         id: tokenConflictDialog
-        imageWriter: root.imageWriter
         parent: root
         anchors.centerIn: parent
 
@@ -1231,7 +1236,7 @@ Item {
             // match your focus group style
             registerFocusGroup("token_conflict_content", function() {
                 // Only include text elements when screen reader is active (otherwise they're not focusable)
-                if (tokenConflictDialog.imageWriter && tokenConflictDialog.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     return [titleText, bodyText]
                 }
                 return []
@@ -1248,7 +1253,7 @@ Item {
         }
 
         // ----- CONTENT -----
-        Text {
+        FocusableHeading {
             id: titleText
             text: qsTr("Replace existing Raspberry Pi Connect token?")
             font.pointSize: Style.fontSizeHeading
@@ -1257,16 +1262,11 @@ Item {
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.Heading
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: tokenConflictDialog.imageWriter ? tokenConflictDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (tokenConflictDialog.imageWriter && tokenConflictDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: tokenConflictDialog.imageWriter ? tokenConflictDialog.imageWriter.isScreenReaderActive() : false
         }
 
         // Body / security note
-        Text {
+        FocusableText {
             id: bodyText
             text: qsTr("A new Raspberry Pi Connect token was received that differs from your current one.\n\n") +
                   qsTr("Do you want to overwrite the existing token?\n\n") +
@@ -1276,12 +1276,7 @@ Item {
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.StaticText
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: tokenConflictDialog.imageWriter ? tokenConflictDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (tokenConflictDialog.imageWriter && tokenConflictDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: tokenConflictDialog.imageWriter ? tokenConflictDialog.imageWriter.isScreenReaderActive() : false
         }
 
         // Buttons row
@@ -1302,7 +1297,7 @@ Item {
                 onClicked: {
                     tokenConflictDialog.close()
                     // Overwrite in C++ and re-emit to existing listeners
-                    root.imageWriter.overwriteConnectToken(tokenConflictDialog.newToken)
+                    ImageWriterSingleton.overwriteConnectToken(tokenConflictDialog.newToken)
                 }
             }
 
@@ -1317,7 +1312,7 @@ Item {
     }
 
     Connections {
-        target: root.imageWriter
+        target: ImageWriterSingleton
         function onConnectTokenConflictDetected(newToken) {
             tokenConflictDialog.openWithToken(newToken)
         }
@@ -1327,8 +1322,8 @@ Item {
         function onConnectTokenCleared() {
             // Reset Pi Connect state when token is cleared (e.g., after write completes)
             // Note: Snapshot is already captured when entering writing step, so no need to capture here
-            piConnectEnabled = false
-            delete customizationSettings.piConnectEnabled
+            root.piConnectEnabled = false
+            delete root.customizationSettings.piConnectEnabled
         }
         
         // Handle repository URL received from deep link (rpi-imager://open?repo=...)
@@ -1340,7 +1335,6 @@ Item {
     // Repository URL confirmation dialog — shown when a deep link contains a custom repo URL
     BaseDialog {
         id: repositoryUrlDialog
-        imageWriter: root.imageWriter
         parent: root
         anchors.centerIn: parent
 
@@ -1388,7 +1382,7 @@ Item {
             // match your focus group style
             registerFocusGroup("repo_url_content", function() {
                 // Only include text elements when screen reader is active (otherwise they're not focusable)
-                if (repositoryUrlDialog.imageWriter && repositoryUrlDialog.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     return [repoTitleText, repoBodyText, repoUrlText]
                 }
                 return []
@@ -1405,7 +1399,7 @@ Item {
         }
 
         // ----- CONTENT -----
-        Text {
+        FocusableHeading {
             id: repoTitleText
             text: repositoryUrlDialog.isLocalFile 
                 ? qsTr("Open local repository file?")
@@ -1416,16 +1410,11 @@ Item {
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.Heading
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (repositoryUrlDialog.imageWriter && repositoryUrlDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
         }
 
         // Body / security note
-        Text {
+        FocusableText {
             id: repoBodyText
             text: repositoryUrlDialog.isLocalFile
                 ? qsTr("You are opening a local Raspberry Pi Imager manifest file. This will replace the current OS list with the contents of this file.")
@@ -1436,12 +1425,7 @@ Item {
             color: Style.formLabelColor
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
-            Accessible.role: Accessible.StaticText
-            Accessible.name: text
             Accessible.ignored: false
-            Accessible.focusable: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (repositoryUrlDialog.imageWriter && repositoryUrlDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
         }
         
         // Show the URL being requested
@@ -1454,7 +1438,7 @@ Item {
             border.width: 1
             radius: Style.listItemBorderRadius
             
-            Text {
+            FocusableText {
                 id: repoUrlText
                 anchors.fill: parent
                 anchors.margins: Style.spacingSmall
@@ -1465,12 +1449,8 @@ Item {
                 wrapMode: Text.WrapAnywhere
                 elide: Text.ElideMiddle
                 maximumLineCount: 3
-                Accessible.role: Accessible.StaticText
                 Accessible.name: qsTr("Repository URL: %1").arg(repositoryUrlDialog.repoUrl)
                 Accessible.ignored: false
-                Accessible.focusable: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (repositoryUrlDialog.imageWriter && repositoryUrlDialog.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: repositoryUrlDialog.imageWriter ? repositoryUrlDialog.imageWriter.isScreenReaderActive() : false
             }
         }
 
@@ -1498,7 +1478,7 @@ Item {
                     repositoryUrlDialog.close()
                     // Switch to the new repository and reset wizard
                     // QML auto-converts string to QUrl for C++ method
-                    root.imageWriter.refreshOsListFrom(repositoryUrlDialog.repoUrl)
+                    ImageWriterSingleton.refreshOsListFrom(repositoryUrlDialog.repoUrl)
                     root.resetWizard()
                 }
             }
@@ -1513,7 +1493,6 @@ Item {
         }
     }
 
-    
     function onFinalizing() {
         // Forward to the WritingStep if currently active
         if (currentStep === stepWriting && wizardStack.currentItem) {
@@ -1575,6 +1554,7 @@ Item {
         sshEnabled = false
         piConnectEnabled = false
         piConnectAvailable = false
+        targetIsFastboot = false
 
         ccRpiAvailable = false
         ifI2cEnabled = false
@@ -1587,14 +1567,14 @@ Item {
         supportsUsbGadget = false
         
         // Reset hardware model selection to prevent stale state
-        if (imageWriter) {
-            var hwModel = imageWriter.getHWList()
+        if (ImageWriterSingleton) {
+            var hwModel = ImageWriterSingleton.getHWList()
             if (hwModel) {
                 hwModel.currentIndex = -1
             }
             // Also clear ImageWriter's internal source and destination state
-            imageWriter.setSrc("")
-            imageWriter.setDst("", 0)
+            ImageWriterSingleton.setSrc("")
+            ImageWriterSingleton.setDst("", 0)
         }
         
         // Navigate back to the first step (device selection if online, OS selection if offline)
@@ -1606,7 +1586,7 @@ Item {
         // Reset only the storage selection to allow choosing a new storage device
         // while preserving device, OS, and customization settings
         selectedStorageName = ""
-        imageWriter.setDst("", 0)
+        ImageWriterSingleton.setDst("", 0)
         
         // Reset ephemeral Pi Connect state (session-only, not preserved)
         // The token is already cleared when write completes, but ensure the enabled flag is reset

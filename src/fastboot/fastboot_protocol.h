@@ -40,6 +40,19 @@ public:
                          std::string_view command,
                          int timeoutMs);
 
+    // Send an ASCII command and capture every INFO/TEXT line emitted
+    // by the device before the terminal OKAY/FAIL response.  Useful
+    // for OEM commands (e.g. "getvar public-key", "oem fwcrypto
+    // sign-hash") whose payload is delivered across multiple INFO
+    // packets rather than in the terminal response message.
+    struct CaptureResult {
+        Response terminal;
+        std::vector<std::string> infoLines;
+    };
+    CaptureResult sendCommandCapture(rpiboot::IUsbTransport& transport,
+                                      std::string_view command,
+                                      int timeoutMs);
+
     // Download data to the device (for use with flash).
     // Sends "download:<hex-size>", waits for DATA response, then
     // streams the data via bulk OUT.
@@ -80,6 +93,18 @@ public:
                     rpiboot::ProgressCallback progress,
                     std::atomic<bool>& cancelled);
 
+    // Mount a block device partition on the device.
+    // Sends "oem mount <device> <mountpoint> [fstype]".
+    bool mountDevice(rpiboot::IUsbTransport& transport,
+                     std::string_view device,
+                     std::string_view mountpoint,
+                     std::string_view fstype = {});
+
+    // Unmount a mountpoint on the device.
+    // Sends "oem umount <mountpoint>".
+    bool umountDevice(rpiboot::IUsbTransport& transport,
+                      std::string_view mountpoint);
+
     // Write a file to the device filesystem.
     // Stages the data, then sends "oem download-file <devicePath>".
     bool writeDeviceFile(rpiboot::IUsbTransport& transport,
@@ -93,6 +118,34 @@ public:
     std::vector<uint8_t> readDeviceFile(rpiboot::IUsbTransport& transport,
                                          std::string_view devicePath,
                                          std::atomic<bool>& cancelled);
+
+    // ── EEPROM (rpi-fastbootd be8a8ce) ────────────────────────────────
+    //
+    // The device-side handlers read whatever was just downloaded via
+    // `download:` as the EEPROM image. `spidev` is optional and may be
+    // empty to let the device auto-detect the SPI bus.
+
+    // Download `image`, then issue "oem eeprom-update [<spidev>]".
+    // Uses a long timeout to cover the SPI flash erase + write cycle.
+    bool updateEeprom(rpiboot::IUsbTransport& transport,
+                      std::span<const uint8_t> image,
+                      std::string_view spidev,
+                      rpiboot::ProgressCallback progress,
+                      std::atomic<bool>& cancelled);
+
+    // Download `image`, then issue "oem eeprom-verify [<spidev>]".
+    bool verifyEeprom(rpiboot::IUsbTransport& transport,
+                      std::span<const uint8_t> image,
+                      std::string_view spidev,
+                      rpiboot::ProgressCallback progress,
+                      std::atomic<bool>& cancelled);
+
+    // Issue "oem eeprom-read [<spidev>]" then upload the staged image.
+    // Returns the EEPROM bytes, or empty on failure (lastError() set).
+    std::vector<uint8_t> readEeprom(rpiboot::IUsbTransport& transport,
+                                     std::string_view spidev,
+                                     rpiboot::ProgressCallback progress,
+                                     std::atomic<bool>& cancelled);
 
     const std::string& lastError() const { return _lastError; }
 

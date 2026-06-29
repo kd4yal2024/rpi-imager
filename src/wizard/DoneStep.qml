@@ -3,6 +3,8 @@
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -13,13 +15,10 @@ import RpiImager
 WizardStepBase {
     id: root
     
-    required property ImageWriter imageWriter
-    required property var wizardContainer
-    
     title: qsTr("Write complete!")
     showBackButton: false
     showNextButton: false
-    readonly property bool autoEjectEnabled: imageWriter.getBoolSetting("eject")
+    readonly property bool autoEjectEnabled: ImageWriterSingleton.getBoolSetting("eject")
     // Use snapshot of customization flags captured when write completed
     // This preserves the state even after token/flags are cleared for security
     readonly property bool anyCustomizationsApplied: (
@@ -50,7 +49,7 @@ WizardStepBase {
             Layout.fillWidth: true
             spacing: Style.spacingMedium
             
-            Text {
+            FocusableHeading {
                 id: choicesHeading
                 text: qsTr("Your choices:")
                 font.pointSize: Style.fontSizeHeading
@@ -58,11 +57,6 @@ WizardStepBase {
                 font.bold: true
                 color: Style.formLabelColor
                 Layout.fillWidth: true
-                Accessible.role: Accessible.Heading
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
             
             GridLayout {
@@ -72,21 +66,17 @@ WizardStepBase {
                 columnSpacing: Style.formColumnSpacing
                 rowSpacing: Style.spacingSmall
                 
-                Text {
+                FocusableText {
                     id: deviceLabel
                     text: CommonStrings.device
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + ": " + (wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + ": " + (root.wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected)
                 }
                 Text {
                     id: deviceValue
-                    text: wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected
+                    text: root.wizardContainer.selectedDeviceName || CommonStrings.noDeviceSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -106,21 +96,17 @@ WizardStepBase {
                     }
                 }
                 
-                Text {
+                FocusableText {
                     id: osLabel
                     text: qsTr("Operating system:")
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + " " + (wizardContainer.selectedOsName || CommonStrings.noImageSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + " " + (root.wizardContainer.selectedOsName || CommonStrings.noImageSelected)
                 }
                 Text {
                     id: osValue
-                    text: wizardContainer.selectedOsName || CommonStrings.noImageSelected
+                    text: root.wizardContainer.selectedOsName || CommonStrings.noImageSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -140,21 +126,17 @@ WizardStepBase {
                     }
                 }
                 
-                Text {
+                FocusableText {
                     id: storageLabel
                     text: qsTr("Storage:")
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamily
                     color: Style.formLabelColor
-                    Accessible.role: Accessible.StaticText
-                    Accessible.name: text + " " + (wizardContainer.selectedStorageName || CommonStrings.noStorageSelected)
-                    Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                    focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                    activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
+                    Accessible.name: text + " " + (root.wizardContainer.selectedStorageName || CommonStrings.noStorageSelected)
                 }
                 Text {
                     id: storageValue
-                    text: wizardContainer.selectedStorageName || CommonStrings.noStorageSelected
+                    text: root.wizardContainer.selectedStorageName || CommonStrings.noStorageSelected
                     font.pointSize: Style.fontSizeDescription
                     font.family: Style.fontFamilyBold
                     font.bold: true
@@ -176,7 +158,7 @@ WizardStepBase {
             }
             
             // Customization summary
-            Text {
+            FocusableHeading {
                 id: customizationsHeading
                 text: qsTr("Customisations applied:")
                 font.pointSize: Style.fontSizeFormLabel
@@ -186,11 +168,6 @@ WizardStepBase {
                 Layout.fillWidth: true
                 Layout.topMargin: Style.spacingSmall
                 visible: root.anyCustomizationsApplied
-                Accessible.role: Accessible.Heading
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
             
             ScrollView {
@@ -205,7 +182,7 @@ WizardStepBase {
                 Accessible.name: {
                     // Build a list of visible customizations to announce using snapshot
                     var items = []
-                    var snapshot = wizardContainer.completionSnapshot
+                    var snapshot = root.wizardContainer.completionSnapshot
                     if (snapshot.hostnameConfigured) items.push(CommonStrings.hostnameConfigured)
                     if (snapshot.localeConfigured) items.push(CommonStrings.localeConfigured)
                     if (snapshot.userConfigured) items.push(CommonStrings.userAccountConfigured)
@@ -240,7 +217,7 @@ WizardStepBase {
                     Column {
                         id: customizationColumn
                         width: parent.width
-                        property var snapshot: wizardContainer.completionSnapshot
+                        property var snapshot: root.wizardContainer.completionSnapshot
                         Text { text: "✓ " + CommonStrings.hostnameConfigured; font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.hostnameConfigured }
                         Text { text: "✓ " + CommonStrings.localeConfigured; font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.localeConfigured }
                         Text { text: "✓ " + CommonStrings.userAccountConfigured; font.pointSize: Style.fontSizeDescription; font.family: Style.fontFamily; color: Style.formLabelColor; visible: customizationColumn.snapshot.userConfigured }
@@ -257,7 +234,7 @@ WizardStepBase {
                 }
                 ScrollBar.vertical: ScrollBar { policy: contentItem.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff; width: Style.scrollBarWidth }
             }
-            Text {
+            FocusableText {
                 id: ejectInstruction
                 text: root.autoEjectEnabled ? qsTr("The storage device was ejected automatically. You can now remove it safely.") : qsTr("Please eject the storage device before removing it from your computer.")
                 font.pointSize: Style.fontSizeDescription
@@ -266,11 +243,6 @@ WizardStepBase {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
-                Accessible.role: Accessible.StaticText
-                Accessible.name: text
-                Accessible.focusable: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
-                focusPolicy: (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-                activeFocusOnTab: root.imageWriter ? root.imageWriter.isScreenReaderActive() : false
             }
         }        
     }
@@ -293,21 +265,21 @@ WizardStepBase {
             onClicked: {
                 // Return to storage selection to write the same image to another SD card
                 // This preserves device, OS, and customization settings
-                wizardContainer.resetToWriteStep()
+                root.wizardContainer.resetToWriteStep()
             }
         },
         
         ImButtonRed {
             id: finishButton
-            text: imageWriter.isEmbeddedMode() ? qsTr("Reboot") : CommonStrings.finish
-            accessibleDescription: imageWriter.isEmbeddedMode() ? qsTr("Reboot the system to apply changes") : qsTr("Close Raspberry Pi Imager and exit the application")
+            text: ImageWriterSingleton.isEmbeddedMode() ? qsTr("Reboot") : CommonStrings.finish
+            accessibleDescription: ImageWriterSingleton.isEmbeddedMode() ? qsTr("Reboot the system to apply changes") : qsTr("Close Raspberry Pi Imager and exit the application")
             enabled: true
             activeFocusOnTab: true
             Layout.minimumWidth: Style.buttonWidthMinimum
             Layout.preferredHeight: Style.buttonHeightStandard
             onClicked: {
-                if (imageWriter.isEmbeddedMode()) {
-                    imageWriter.reboot()
+                if (ImageWriterSingleton.isEmbeddedMode()) {
+                    ImageWriterSingleton.reboot()
                 } else {
                     // Close the application
                     // Advanced options settings are already saved

@@ -25,7 +25,6 @@
 #include <QQmlContext>
 #include <QIcon>
 #include "imagewriter.h"
-#include "networkaccessmanagerfactory.h"
 #include "nativefiledialog.h"
 #include <QQuickWindow>
 #include <QScreen>
@@ -38,7 +37,6 @@
 #include "platformquirks.h"
 #ifdef Q_OS_DARWIN
 #include <CoreFoundation/CoreFoundation.h>
-#include <CoreServices/CoreServices.h>
 #endif
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -196,6 +194,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 #endif
 
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     /** QtQuick on QT5 exhibits spurious disk cache failures that cannot be
      * resolved by a user in a trivial manner (they have to delete the cache manually).
      *
@@ -203,8 +202,13 @@ int main(int argc, char *argv[])
      * between this and a hard-to-detect spurious failure affecting Linux, macOS and Windows,
      * this trade is the one most likely to result in a good experience for the widest group
      * of users.
+     *
+     * On Qt6 the disk cache is reliable, and our QML is compiled ahead of time by
+     * qmlcachegen anyway (see NO_CACHEGEN removal in CMakeLists.txt), so we leave the
+     * cache enabled to keep launches fast.
      */
     qputenv("QML_DISABLE_DISK_CACHE", "true");
+#endif
 
     // Disable virtual keyboard input method to prevent QtVirtualKeyboard dependency
     qputenv("QT_IM_MODULE", "");
@@ -218,8 +222,15 @@ int main(int argc, char *argv[])
     qputenv("QT_QUICK_CONTROLS_MATERIAL_VARIANT", "Dense");
 #endif
 
-    // Note: Scale factor detection is handled by the AppRun script for embedded mode
-    // by reading DRM EDID data and setting QT_SCALE_FACTOR before launching
+    // Embedded builds run under linuxfb/eglfs with no window manager to
+    // negotiate display DPI, so we determine the UI scale ourselves from the
+    // connected display and set QT_SCALE_FACTOR before QGuiApplication reads it
+    // during platform initialisation.
+#ifdef Q_OS_LINUX
+    if (::isEmbeddedMode()) {
+        PlatformQuirks::applyEmbeddedDisplayScaling();
+    }
+#endif
 
     QGuiApplication app(argc, argv);
 
@@ -275,21 +286,16 @@ int main(int argc, char *argv[])
     CurlNetworkConfig::ensureInitialized();
 
     // Create ImageWriter early to check embedded mode
-    ImageWriter imageWriter;
+    ImageWriter imageWriter(nullptr);
 
-#ifdef Q_OS_DARWIN
-    // Ensure our app is the default handler for rpi-imager:// scheme so Safari recognizes it
+    // Register as the handler for the rpi-imager:// URL scheme so the Raspberry
+    // Pi Connect sign-in callback can route back to us. Platform mechanics live
+    // in the PAL (desktop file on Linux, Launch Services on macOS, installer on
+    // Windows). Skipped in embedded mode, which has no desktop environment.
+    if (!imageWriter.isEmbeddedMode())
     {
-        CFStringRef scheme = CFSTR("rpi-imager");
-        CFBundleRef bundle = CFBundleGetMainBundle();
-        if (bundle) {
-            CFStringRef bundleId = (CFStringRef)CFBundleGetIdentifier(bundle);
-            if (bundleId) {
-                LSSetDefaultHandlerForURLScheme(scheme, bundleId);
-            }
-        }
+        PlatformQuirks::registerUriScheme();
     }
-#endif
 #ifdef Q_OS_LINUX
     if (imageWriter.isEmbeddedMode()) {
         // Font and locale setup only needed for embedded Linux systems
@@ -315,7 +321,6 @@ int main(int argc, char *argv[])
         qDebug() << "Embedded mode detected. System locale:" << QLocale::system().name();
     }
 #endif
-    NetworkAccessManagerFactory namf;
     QQmlApplicationEngine engine;
     QString customQm;
     bool enableLanguageSelection = false;
@@ -634,7 +639,6 @@ int main(int argc, char *argv[])
         imageWriter.setOsListRefreshOverride(sanitizedInterval, sanitizedJitter);
     }
     imageWriter.setEngine(&engine);
-    engine.setNetworkAccessManagerFactory(&namf);
 
     // Determine if we should show the language selection landing step
     // Consider language undetermined if QLocale::system() is AnyLanguage or C
@@ -661,8 +665,14 @@ int main(int argc, char *argv[])
 
     const bool showLanguageSelection = enableLanguageSelection || !couldDetermineLanguage || imageWriter.isEmbeddedMode() || hasSavedLanguagePreference;
 
+    // Supply the app-owned ImageWriter instance to the declaratively-registered
+    // "ImageWriterSingleton" QML singleton (see ImageWriter::create). Declarative
+    // registration keeps the singleton visible to qmllint/qmlsc and — unlike a runtime
+    // qmlRegisterSingletonInstance into the RpiImager URI — does not disturb the
+    // qt_add_qml_module module's other C++ types (HWListModel, DriveListModel, ...).
+    ImageWriter::setQmlInstance(&imageWriter);
+
     engine.setInitialProperties(QVariantMap{
-        {"imageWriter", QVariant::fromValue(&imageWriter)},
         {"showLanguageSelection", showLanguageSelection}
     });
     engine.load(QUrl(QStringLiteral("qrc:/qt/qml/RpiImager/main.qml")));

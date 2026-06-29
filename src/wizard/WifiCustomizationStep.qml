@@ -3,6 +3,8 @@
  * Copyright (C) 2020 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls
@@ -14,8 +16,6 @@ import RpiImager
 WizardStepBase {
     id: root
     
-    required property ImageWriter imageWriter
-    required property var wizardContainer
     // "open" | "secure"
     property string wifiMode: "secure"
     property string originalSavedSSID: ""
@@ -68,7 +68,7 @@ WizardStepBase {
 
         // If not saved, try to auto-detect the current SSID from the system
         if (!fieldWifiSSID.text || fieldWifiSSID.text.length === 0) {
-            var detectedSsid = imageWriter.getSSID()
+            var detectedSsid = ImageWriterSingleton.getSSID()
             console.log("WifiCustomizationStep: detected SSID:", detectedSsid)
             if (detectedSsid && detectedSsid.length > 0) {
                 fieldWifiSSID.text = detectedSsid
@@ -90,7 +90,7 @@ WizardStepBase {
         if (!hadSavedCrypt && fieldWifiSSID.text && fieldWifiSSID.text.length > 0) {
             // Auto-populate WiFi password from system keychain when available
             // Only when no crypted password is already saved
-            var psk = imageWriter.getPSKForSSID(fieldWifiSSID.text)
+            var psk = ImageWriterSingleton.getPSKForSSID(fieldWifiSSID.text)
             if (psk && psk.length > 0) {
                 fieldWifiPassword.text = psk
                 fieldWifiPasswordConfirm.text = psk
@@ -111,20 +111,20 @@ WizardStepBase {
     // This is called when the user clicks "Allow" in the macOS location permission dialog
     // after the initial 5-second timeout has expired
     Connections {
-        target: imageWriter
+        target: ImageWriterSingleton
         function onLocationPermissionGranted() {
             console.log("WifiCustomizationStep: Location permission granted, retrying SSID detection")
             // Only retry if SSID field is still empty (user hasn't manually entered one)
             if (!fieldWifiSSID.text || fieldWifiSSID.text.length === 0) {
-                var detectedSsid = imageWriter.getSSID()
+                var detectedSsid = ImageWriterSingleton.getSSID()
                 console.log("WifiCustomizationStep: re-detected SSID:", detectedSsid)
                 if (detectedSsid && detectedSsid.length > 0) {
                     fieldWifiSSID.text = detectedSsid
-                    ssidAutoDetected = true
+                    root.ssidAutoDetected = true
                     
                     // Also try to auto-populate the password if we don't have one saved
-                    if (!hadSavedCrypt && (!fieldWifiPassword.text || fieldWifiPassword.text.length === 0)) {
-                        var psk = imageWriter.getPSKForSSID(detectedSsid)
+                    if (!root.hadSavedCrypt && (!fieldWifiPassword.text || fieldWifiPassword.text.length === 0)) {
+                        var psk = ImageWriterSingleton.getPSKForSSID(detectedSsid)
                         if (psk && psk.length > 0) {
                             fieldWifiPassword.text = psk
                             fieldWifiPasswordConfirm.text = psk
@@ -240,8 +240,8 @@ WizardStepBase {
                         id: tabSecure
                         text: qsTr("Secure network")
                         accessibleDescription: qsTr("Configure Wi-Fi for a password-protected network with WPA2/WPA3 encryption")
-                        active: wifiMode === "secure"
-                        onClicked: { wifiMode = "secure"; updatePasswordFieldUI() }
+                        active: root.wifiMode === "secure"
+                        onClicked: { root.wifiMode = "secure"; updatePasswordFieldUI() }
 
                         onActiveFocusChanged: {
                             if (activeFocus) wifiScroll.scrollToItem(this);
@@ -252,8 +252,8 @@ WizardStepBase {
                         id: tabOpen
                         text: qsTr("Open network")
                         accessibleDescription: qsTr("Configure Wi-Fi for an unencrypted network without password protection")
-                        active: wifiMode === "open"
-                        onClicked: { wifiMode = "open"; updatePasswordFieldUI() }
+                        active: root.wifiMode === "open"
+                        onClicked: { root.wifiMode = "open"; updatePasswordFieldUI() }
 
                         onActiveFocusChanged: {
                             if (activeFocus) wifiScroll.scrollToItem(this);
@@ -290,9 +290,9 @@ WizardStepBase {
                     WizardFormLabel {
                         id: lblPassword
                         text: CommonStrings.password
-                        visible: showPw
+                        visible: root.showPw
                         accessibleDescription: {
-                            var canKeep = hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), originalSavedSSID)
+                            var canKeep = root.hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), root.originalSavedSSID)
                             return canKeep 
                                 ? qsTr("Enter a new Wi-Fi password, or leave blank to keep the previously saved password. Must be 8-63 characters or a 64-character hexadecimal key.")
                                 : qsTr("Enter your Wi-Fi network password. Must be 8-63 characters or a 64-character hexadecimal key. You will need to re-enter it in the next field to confirm.")
@@ -303,7 +303,7 @@ WizardStepBase {
                         id: fieldWifiPassword
                         Layout.fillWidth: true
                         font.pointSize: Style.fontSizeInput
-                        visible: showPw
+                        visible: root.showPw
 
                         textField.onActiveFocusChanged: {
                             if (textField.activeFocus)
@@ -319,9 +319,9 @@ WizardStepBase {
                     WizardFormLabel {
                         id: lblPasswordConfirm
                         text: qsTr("Confirm password:")
-                        visible: showPw
+                        visible: root.showPw
                         accessibleDescription: {
-                            var canKeep = hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), originalSavedSSID)
+                            var canKeep = root.hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), root.originalSavedSSID)
                             return canKeep 
                                 ? qsTr("Re-enter the new Wi-Fi password to confirm, or leave blank to keep the previously saved password.")
                                 : qsTr("Re-enter the Wi-Fi password to confirm it matches.")
@@ -333,10 +333,10 @@ WizardStepBase {
                         Layout.fillWidth: true
                         font.pointSize: Style.fontSizeInput
                         placeholderText: {
-                            var canKeep = hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), originalSavedSSID)
+                            var canKeep = root.hadSavedCrypt && ssidUnchanged((fieldWifiSSID.text || "").trim(), root.originalSavedSSID)
                             return canKeep ? qsTr("Re-enter to change password") : qsTr("Re-enter password")
                         }
-                        visible: showPw
+                        visible: root.showPw
                         textField.onActiveFocusChanged: {
                             if (textField.activeFocus)
                                 wifiScroll.scrollToItem(fieldWifiPasswordConfirm);
@@ -348,13 +348,13 @@ WizardStepBase {
                     }
 
                     // Empty label to maintain grid alignment
-                    Item { width: 1; height: 1; visible: showPw }
+                    Item { width: 1; height: 1; visible: root.showPw }
 
                     Text {
                         id: pwdHint
                         Layout.fillWidth: true
                         Layout.columnSpan: 1
-                        visible: showPw
+                        visible: root.showPw
                         wrapMode: Text.WordWrap
                         text: passwordErrorMessage()
                         color: (text === " ") ? "transparent" : Style.formLabelErrorColor
@@ -464,6 +464,7 @@ WizardStepBase {
         // Handle SSID and password
         if (ssid.length > 0) {
             wizardContainer.customizationSettings.wifiSSID = ssid
+            wizardContainer.customizationSettings.wifiSsidOctetsBase64 = ImageWriterSingleton.wifiSsidOctetsBase64(ssid)
 
             if (wifiMode === "open") {
                // always clear in open mode
@@ -475,7 +476,7 @@ WizardStepBase {
                    if (pwd !== fieldWifiPasswordConfirm.text) return;
                    // overwrite with new password
                    var isPassphrase = (pwd.length >= 8 && pwd.length < 64)
-                   wizardContainer.customizationSettings.wifiPasswordCrypt = isPassphrase ? imageWriter.pbkdf2(pwd, ssid) : pwd
+                   wizardContainer.customizationSettings.wifiPasswordCrypt = isPassphrase ? ImageWriterSingleton.pbkdf2(pwd, ssid) : pwd
                } else if (hadCryptBefore && sameSSID) {
                    // keep the existing crypt
                    // (do nothing)
@@ -490,22 +491,24 @@ WizardStepBase {
         } else {
             // No SSID -> clear SSID and password settings
             delete wizardContainer.customizationSettings.wifiSSID
+            delete wizardContainer.customizationSettings.wifiSsidOctetsBase64
             delete wizardContainer.customizationSettings.wifiPasswordCrypt
             delete wizardContainer.customizationSettings.wifiHidden
             wizardContainer.wifiConfigured = false
         }
         
         // Also persist for future sessions
-        var saved = imageWriter.getSavedCustomisationSettings()
+        var saved = ImageWriterSingleton.getSavedCustomisationSettings()
         saved.wifiMode = wifiMode
         if (ssid.length > 0) {
             saved.wifiSSID = ssid
+            saved.wifiSsidOctetsBase64 = ImageWriterSingleton.wifiSsidOctetsBase64(ssid)
             if (wifiMode === "open") {
                delete saved.wifiPasswordCrypt
             } else {
                if (pwd.length > 0) {
                    var isPassphrase2 = (pwd.length >= 8 && pwd.length < 64)
-                   saved.wifiPasswordCrypt = isPassphrase2 ? imageWriter.pbkdf2(pwd, ssid) : pwd
+                   saved.wifiPasswordCrypt = isPassphrase2 ? ImageWriterSingleton.pbkdf2(pwd, ssid) : pwd
                } else if (hadCryptBefore && sameSSID) {
                    // keep existing
                } else {
@@ -515,10 +518,11 @@ WizardStepBase {
             saved.wifiHidden = hidden
         } else {
             delete saved.wifiSSID
+            delete saved.wifiSsidOctetsBase64
             delete saved.wifiPasswordCrypt
             delete saved.wifiHidden
         }
-        imageWriter.setSavedCustomisationSettings(saved)
+        ImageWriterSingleton.setSavedCustomisationSettings(saved)
         // Do not log sensitive data
     }
     

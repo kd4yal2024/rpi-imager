@@ -135,6 +135,7 @@ public:
     void setDebugAsyncQueueDepth(int depth);
     void setDebugIPv4Only(bool enabled);
     void setDebugSkipEndOfDevice(bool enabled);
+    void setDebugIgnoreDeviceLimits(bool enabled);
 
     /*
      * Thread safe download progress query functions
@@ -201,6 +202,7 @@ signals:
     void eventDriveMbrZeroing(quint32 durationMs, bool success, QString metadata);  // MBR zeroing timing
     void eventDirectIOAttempt(bool attempted, bool succeeded, bool currentlyEnabled, int errorCode, QString errorMessage);
     void eventCustomisation(quint32 durationMs, bool success, QString metadata);
+    void finalSyncStarting();  // Emitted before post-write fdatasync/fsync
     void eventFinalSync(quint32 durationMs, bool success);
     void eventVerify(quint32 durationMs, bool success, QByteArray writeHash, QByteArray verifyHash);
     void eventDecompressInit(quint32 durationMs, bool success);
@@ -245,6 +247,7 @@ protected:
     virtual void _onVerifyProgress() {}  // Called during verify loop for progress updates
     int _authopen(const QByteArray &filename);
     bool _openAndPrepareDevice();
+    virtual void _onDevicePrepared() {}  // Hook for subclasses after device open, before writes
     void _writeCache(const char *buf, size_t len);
     qint64 _sectorsWritten();
     void _closeFiles();
@@ -312,7 +315,8 @@ protected:
     int _debugAsyncQueueDepth;
     bool _debugIPv4Only;
     bool _debugSkipEndOfDevice;
-    
+    bool _debugIgnoreDeviceLimits;
+
     void _initializeSyncConfiguration();
     void _updateBottleneckState();
 

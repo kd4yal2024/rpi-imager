@@ -3,8 +3,9 @@
  * Copyright (C) 2020-2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import QtCore
 import "../qmlcomponents"
@@ -15,12 +16,16 @@ import RpiImager
 WizardStepBase {
     id: root
     
-    required property ImageWriter imageWriter
-    required property var wizardContainer
-    
     // Track RSA key path for reactive UI updates
     property string rsaKeyPath: getRsaKeyPath()
-    
+
+    // OTP secure-boot provisioning UI is scaffolded but not yet wired to a backend:
+    // the pill below sets state nothing consumes, and ConfirmOtpProgramDialog is never
+    // shown. Keep the section hidden until the rpiboot OTP-bootstrap flow is ported from
+    // rpi-sb-provisioner; flip this to true (or remove the gate) when it lands. Shipping
+    // it inert would present misleading "device is locked to signed boot" UI.
+    readonly property bool otpProvisioningImplemented: false
+
     // Only show and enable this step if OS supports secure boot
     visible: wizardContainer.secureBootAvailable
     enabled: wizardContainer.secureBootAvailable
@@ -54,19 +59,19 @@ WizardStepBase {
                 }
                 onClicked: {
                     // Prefer native file dialog via Imager's wrapper, but only if available
-                    if (imageWriter.nativeFileDialogAvailable()) {
+                    if (ImageWriterSingleton.nativeFileDialogAvailable()) {
                         var home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
                         var startDir = home && home.length > 0 ? home + "/.ssh" : ""
-                        var keyPath = imageWriter.getNativeOpenFileName(
+                        var keyPath = ImageWriterSingleton.getNativeOpenFileName(
                             qsTr("Select RSA Private Key"), 
                             startDir,
                             qsTr("PEM Files (*.pem);;All Files (*)")
                         );
                         if (keyPath) {
-                            imageWriter.setSetting("secureboot_rsa_key", keyPath)
+                            ImageWriterSingleton.setSetting("secureboot_rsa_key", keyPath)
                             // Update tracked property and wizard container state
                             root.rsaKeyPath = keyPath
-                            wizardContainer.secureBootKeyConfigured = true
+                            root.wizardContainer.secureBootKeyConfigured = true
                             // Rebuild focus order and update UI
                             root.rebuildFocusOrder()
                         }
@@ -95,13 +100,13 @@ WizardStepBase {
                 Layout.topMargin: Style.spacingMedium
                 text: qsTr("Enable Secure Boot Signing")
                 accessibleDescription: qsTr("Sign the boot partition with your RSA key to enable secure boot verification on Raspberry Pi")
-                helpLabel: imageWriter.isEmbeddedMode() ? "" : qsTr("Learn about Secure Boot")
-                helpUrl: imageWriter.isEmbeddedMode() ? "" : "https://github.com/raspberrypi/usbboot/blob/master/secure-boot-recovery/README.md"
+                helpLabel: ImageWriterSingleton.isEmbeddedMode() ? "" : qsTr("Learn about Secure Boot")
+                helpUrl: ImageWriterSingleton.isEmbeddedMode() ? "" : "https://github.com/raspberrypi/usbboot/blob/master/secure-boot-recovery/README.md"
                 checked: false
                 // Only enable if RSA key is configured
                 enabled: root.rsaKeyPath && root.rsaKeyPath.length > 0
                 onToggled: function(isChecked) { 
-                    wizardContainer.secureBootEnabled = isChecked
+                    root.wizardContainer.secureBootEnabled = isChecked
                     // Rebuild focus order when pill state changes
                     root.rebuildFocusOrder()
                 }
@@ -167,8 +172,9 @@ WizardStepBase {
                 color: "transparent"
                 border.color: Style.titleSeparatorColor
                 border.width: 1
-                radius: Style.borderRadius
-                visible: typeof imageWriter.isRpibootDevice === "function" && imageWriter.isRpibootDevice()
+                radius: Style.sectionBorderRadius
+                visible: root.otpProvisioningImplemented
+                         && typeof ImageWriterSingleton.isRpibootDevice === "function" && ImageWriterSingleton.isRpibootDevice()
 
                 ColumnLayout {
                     id: otpColumn
@@ -181,7 +187,7 @@ WizardStepBase {
                         font.family: Style.fontFamily
                         font.pointSize: Style.fontSizeSubtitle
                         font.bold: true
-                        color: Style.textTitleColor
+                        color: Style.formLabelColor
                     }
 
                     Text {
@@ -202,7 +208,7 @@ WizardStepBase {
                         checked: false
                         enabled: root.rsaKeyPath && root.rsaKeyPath.length > 0
                         onToggled: function(isChecked) {
-                            wizardContainer.otpProvisioningEnabled = isChecked
+                            root.wizardContainer.otpProvisioningEnabled = isChecked
                             root.rebuildFocusOrder()
                         }
                     }
@@ -224,8 +230,8 @@ WizardStepBase {
 
     // Helper function to get the RSA key path
     function getRsaKeyPath() {
-        if (imageWriter) {
-            var keyPath = imageWriter.getStringSetting("secureboot_rsa_key")
+        if (ImageWriterSingleton) {
+            var keyPath = ImageWriterSingleton.getStringSetting("secureboot_rsa_key")
             return keyPath || ""
         }
         return ""
@@ -233,8 +239,8 @@ WizardStepBase {
     
     // Helper function to get the RSA key fingerprint
     function getRsaKeyFingerprint() {
-        if (imageWriter && root.rsaKeyPath) {
-            var fingerprint = imageWriter.getRsaKeyFingerprint(root.rsaKeyPath)
+        if (ImageWriterSingleton && root.rsaKeyPath) {
+            var fingerprint = ImageWriterSingleton.getRsaKeyFingerprint(root.rsaKeyPath)
             return fingerprint || qsTr("(unable to compute)")
         }
         return ""
@@ -243,16 +249,16 @@ WizardStepBase {
     // File dialog for RSA key selection (fallback when native dialog unavailable)
     ImFileDialog {
         id: rsaKeyFileDialog
-        imageWriter: root.imageWriter
         parent: root.parent
         anchors.centerIn: parent
         dialogTitle: qsTr("Select RSA Private Key")
         nameFilters: [qsTr("PEM Files (*.pem)"), qsTr("All Files (*)")]
         Component.onCompleted: {
-            // Default to ~/.ssh folder if it exists
-            var home = StandardPaths.writableLocation(StandardPaths.HomeLocation)
-            if (home && home.length > 0) {
-                var url = (Qt.platform.os === "windows") ? ("file:///" + home + "/.ssh") : ("file://" + home + "/.ssh")
+            // Default to the user's ~/.ssh folder. writableLocation() already returns a
+            // platform-correct file:// URL, so just append the subfolder.
+            var home = String(StandardPaths.writableLocation(StandardPaths.HomeLocation))
+            if (home.length > 0) {
+                var url = home + "/.ssh"
                 rsaKeyFileDialog.currentFolder = url
                 rsaKeyFileDialog.folder = url
             }
@@ -260,10 +266,10 @@ WizardStepBase {
         onAccepted: {
             if (selectedFile && selectedFile.toString().length > 0) {
                 var filePath = selectedFile.toString().replace(/^file:\/\//, "")
-                imageWriter.setSetting("secureboot_rsa_key", filePath)
+                ImageWriterSingleton.setSetting("secureboot_rsa_key", filePath)
                 // Update tracked property and wizard container state
                 root.rsaKeyPath = filePath
-                wizardContainer.secureBootKeyConfigured = true
+                root.wizardContainer.secureBootKeyConfigured = true
                 // Rebuild focus order and update UI
                 root.rebuildFocusOrder()
             }
@@ -310,13 +316,13 @@ WizardStepBase {
         }
         
         // Also persist for future sessions
-        var saved = imageWriter.getSavedCustomisationSettings()
+        var saved = ImageWriterSingleton.getSavedCustomisationSettings()
         if (secureBootEnablePill.checked) {
             saved.secureBootEnabled = true
         } else {
             delete saved.secureBootEnabled
         }
-        imageWriter.setSavedCustomisationSettings(saved)
+        ImageWriterSingleton.setSavedCustomisationSettings(saved)
         
         console.log("Secure Boot enabled:", secureBootEnablePill.checked)
     }

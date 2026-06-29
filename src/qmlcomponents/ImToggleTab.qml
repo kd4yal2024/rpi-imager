@@ -2,6 +2,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * Copyright (C) 2025 Raspberry Pi Ltd
  */
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 
@@ -16,18 +18,6 @@ Button {
     // Allow instances to provide a custom accessibility description
     property string accessibleDescription: ""
     
-    // Access imageWriter from parent context
-    property var imageWriter: {
-        var item = parent;
-        while (item) {
-            if (item.imageWriter !== undefined) {
-                return item.imageWriter;
-            }
-            item = item.parent;
-        }
-        return null;
-    }
-
     font.family: Style.fontFamily
     font.pointSize: Style.fontSizeSm
     font.capitalization: Font.AllUppercase
@@ -43,7 +33,7 @@ Button {
                         ? Style.buttonFocusedBackgroundColor
                         : (control.hovered ? Style.buttonHoveredBackgroundColor : Style.buttonBackgroundColor)))
               : Qt.rgba(0, 0, 0, 0.1)
-        radius: (control.imageWriter && control.imageWriter.isEmbeddedMode()) ? Style.buttonBorderRadiusEmbedded : 4
+        radius: Style.cornerRadius(4)
         border.color: (control.enabled && !control.active) ? Style.popupBorderColor : "transparent"
         border.width: control.active ? 0 : 1
         antialiasing: true  // Smooth edges at non-integer scale factors

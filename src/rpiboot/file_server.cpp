@@ -7,25 +7,44 @@
 
 #include <QDebug>
 
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <utility>
 
 namespace rpiboot {
 
 // Vendor IN request type for ep_read (device-to-host control transfer)
 constexpr uint8_t VENDOR_REQUEST_TYPE_IN = VENDOR_REQUEST_TYPE | 0x80;  // 0xC0
 
-// Timeout for reading FileMessages from the device.
-// Upstream uses 20s for a single blocking read. We use a shorter timeout
-// with a retry loop so the UI stays responsive during the wait.
-constexpr int EP_READ_TIMEOUT_MS = 3000;
+// Timeout for reading FileMessages from the device, matching upstream
+// rpiboot's ep_read() (20s blocking control IN).
+//
+// This MUST be long enough to cover the device's longest legitimate pause
+// between messages — most notably the multi-second EEPROM erase/write after
+// it pulls pieeprom.bin, and the gaps between the metadata fields it streams
+// back at the end of provisioning (USER_SERIAL_NUM, MAC_ADDR, EEPROM_UPDATE,
+// SECURE_BOOT_PROVISION, ...).
+//
+// A short timeout here is actively harmful: the file-server protocol is a
+// strict host-polled ping-pong (device sends a message in response to our
+// control IN, waits for our control-OUT ack, then waits for the next IN).
+// If we cancel the IN mid-pause and reissue, the device's eventual response
+// lands misaligned on the next transfer — we read the tail of the previous
+// message as a bogus command, never send the ack the device is waiting for,
+// and the handshake stalls (the device goes silent and we time out forever).
+// Re-enumeration on reboot still returns promptly because libusb reports
+// NO_DEVICE/IO immediately, so the long timeout doesn't cost us in the
+// common completion path.
+constexpr int EP_READ_TIMEOUT_MS = 20000;
 
 bool FileServer::run(IUsbTransport& transport,
                       const std::filesystem::path& firmwareDir,
                       ProgressCallback progress,
                       const std::atomic<bool>& cancelled,
-                      FileResolver resolver)
+                      FileResolver resolver,
+                      bool requireReEnumConfirmation)
 {
     // Use the disk-based resolver as default
     FileResolver resolverFn = resolver ? std::move(resolver)
@@ -35,11 +54,77 @@ bool FileServer::run(IUsbTransport& transport,
 
     uint64_t filesServed = 0;
     int consecutiveErrors = 0;
-    constexpr int MAX_RETRIES = 20;
+    // With a 20s blocking read (EP_READ_TIMEOUT_MS), each retry already waits
+    // out any legitimate device pause, so a small budget is enough.  Real
+    // reboots/disconnects short-circuit immediately via NO_DEVICE/IO below and
+    // don't consume this budget; this only bounds the genuinely-mute-but-
+    // present case (~3 × 20s) and a misaligned-read garbage flood.
+    constexpr int MAX_RETRIES = 3;
     std::string lastFilename;
 
     if (progress)
         progress(0, 0, "Waiting for device file requests...");
+
+    // On a disconnect-with-files-served (NO_DEVICE, IO, exhausted retries, or
+    // a flood of garbage messages), libusb can't tell us whether the device
+    // rebooted into the next stage or was physically unplugged.  This helper
+    // resolves the ambiguity by waiting for an external confirmation signal:
+    //   - Fastboot: a scanner thread polls for the fastboot gadget on the
+    //     same port path and sets the cancellation flag once it appears.
+    //     The gadget is a full Linux instance — boot can take up to ~30 s,
+    //     occasionally longer, so the grace window must cover that worst
+    //     case.  Aligned with the scanner's own 60 s timeout in
+    //     RpibootThread::pollForFastbootDevice() so file_server doesn't
+    //     give up before the scanner does.
+    //   - SecureBootRecovery: a similar scanner watches for the device
+    //     returning to rpiboot after the EEPROM write (the recovery
+    //     config.txt is rewritten by FirmwareManager to ensure
+    //     set_boot_order=0x3 + recovery_reboot=1 are present in the right
+    //     order — see ensureSbrReenumerates).  Same 60 s timeout.
+    // The progress callback is driven during the wait so the caller's
+    // cancel-bridge lambda (which polls fastbootFound and updates the
+    // cancellation flag) has a chance to fire — without that, the flag
+    // would never flip even after re-enumeration.
+    auto resolveDisconnect = [&](const char* reason) -> bool {
+        if (!requireReEnumConfirmation) {
+            qDebug() << "rpiboot:" << reason << "after serving"
+                     << filesServed << "file(s) — treating as successful completion";
+            if (progress)
+                progress(filesServed, filesServed, "Device rebooted into next stage");
+            return true;
+        }
+
+        constexpr int GRACE_WINDOW_MS = 60000;  // matches pollForFastbootDevice
+        constexpr int POLL_INTERVAL_MS = 200;
+        qDebug() << "rpiboot:" << reason << "after serving" << filesServed
+                 << "file(s) — waiting up to" << GRACE_WINDOW_MS
+                 << "ms for next-stage device confirmation"
+                 << "(gadget Linux boot can take ~30s)";
+
+        for (int waited = 0; waited < GRACE_WINDOW_MS; waited += POLL_INTERVAL_MS) {
+            if (cancelled.load()) {
+                qDebug() << "rpiboot: next-stage device confirmed by caller after"
+                         << waited << "ms (" << reason << ")";
+                if (progress)
+                    progress(filesServed, filesServed, "Device rebooted into next stage");
+                return true;
+            }
+            if (progress)
+                progress(filesServed, 0,
+                    "Confirming device re-enumeration ("
+                    + std::to_string(waited / 1000 + 1) + "s of "
+                    + std::to_string(GRACE_WINDOW_MS / 1000) + "s)...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+        }
+
+        _lastError = std::string(reason) + " after serving "
+                   + std::to_string(filesServed)
+                   + " file(s) and never re-enumerated as next-stage device"
+                   + (lastFilename.empty() ? "" : "; last file: " + lastFilename)
+                   + " — check the USB cable and try again";
+        qWarning() << "rpiboot:" << QString::fromStdString(_lastError);
+        return false;
+    };
 
     while (!cancelled.load()) {
         // Read a FileMessage from the device via vendor control transfer IN.
@@ -67,14 +152,11 @@ bool FileServer::run(IUsbTransport& transport,
             constexpr int LIBUSB_ERR_IO        = -1;
             constexpr int LIBUSB_ERR_NO_DEVICE = -4;
             if (bytesRead == LIBUSB_ERR_NO_DEVICE || bytesRead == LIBUSB_ERR_IO) {
-                // If we already served files, the device rebooted into the
-                // next stage (e.g. fastboot gadget) without sending Done.
                 if (filesServed > 0) {
-                    qDebug() << "rpiboot: device disconnected after serving"
-                             << filesServed << "file(s) — treating as successful completion";
-                    if (progress)
-                        progress(filesServed, filesServed, "Device rebooted into next stage");
-                    return true;
+                    return resolveDisconnect(
+                        bytesRead == LIBUSB_ERR_NO_DEVICE
+                            ? "device disconnected (NO_DEVICE)"
+                            : "device disconnected (IO)");
                 }
                 _lastError = "Device disconnected (libusb error "
                     + std::to_string(bytesRead) + ")"
@@ -83,13 +165,8 @@ bool FileServer::run(IUsbTransport& transport,
             }
 
             if (consecutiveErrors > maxRetries) {
-                if (filesServed > 0) {
-                    qDebug() << "rpiboot: max retries reached after serving"
-                             << filesServed << "file(s) — treating as successful completion";
-                    if (progress)
-                        progress(filesServed, filesServed, "Device rebooted into next stage");
-                    return true;
-                }
+                if (filesServed > 0)
+                    return resolveDisconnect("max retries reached");
                 _lastError = "Failed to read FileMessage from device (error "
                     + std::to_string(bytesRead) + " after "
                     + std::to_string(consecutiveErrors) + " retries"
@@ -134,13 +211,8 @@ bool FileServer::run(IUsbTransport& transport,
                      << "0x" << Qt::hex << static_cast<uint32_t>(msg.command) << Qt::dec
                      << ") retry" << consecutiveErrors << "/" << maxRetries;
             if (consecutiveErrors > maxRetries) {
-                if (filesServed > 0) {
-                    qDebug() << "rpiboot: max retries reached after serving"
-                             << filesServed << "file(s) — treating as successful completion";
-                    if (progress)
-                        progress(filesServed, filesServed, "Device rebooted into next stage");
-                    return true;
-                }
+                if (filesServed > 0)
+                    return resolveDisconnect("garbage messages flooded");
                 _lastError = "Unknown file command "
                     + std::to_string(static_cast<int32_t>(msg.command));
                 return false;
@@ -239,7 +311,7 @@ bool FileServer::handleReadFile(IUsbTransport& transport,
     bool isMetadata = !filename.empty() && filename[0] == '*';
 
     if (isMetadata) {
-        parseMetadata(filename, {});
+        parseMetadata(filename);
         // Metadata: zero-length ep_write response (control transfer only, no bulk)
         transport.controlTransfer(VENDOR_REQUEST_TYPE, VENDOR_REQUEST,
                                   0, 0, {}, DEFAULT_TIMEOUT_MS);
@@ -257,7 +329,7 @@ bool FileServer::handleReadFile(IUsbTransport& transport,
 
     // Send file data via ep_write protocol:
     // 1. Control transfer announces the total size (no data payload)
-    // 2. Bulk OUT sends the actual file data in BULK_CHUNK_SIZE chunks
+    // 2. Bulk OUT sends the entire file in a single transfer
     int32_t totalSize = static_cast<int32_t>(data.size());
     uint16_t wValue = static_cast<uint16_t>(totalSize & 0xFFFF);
     uint16_t wIndex = static_cast<uint16_t>((totalSize >> 16) & 0xFFFF);
@@ -269,7 +341,16 @@ bool FileServer::handleReadFile(IUsbTransport& transport,
         return false;
     }
 
-    // Stream file data via bulk OUT
+    if (cancelled.load())
+        return false;
+
+    // Chunk the bulk transfer into BULK_CHUNK_SIZE (16 KB) pieces with a
+    // generous per-chunk timeout, matching upstream usbboot's ep_write().
+    // A single 56 MB libusb_bulk_transfer call is rejected by the macOS
+    // USB stack (LIBUSB_ERROR_IO -1) for oversized requests; the upstream
+    // tool avoids that by issuing many small calls in sequence.
+    constexpr int CHUNK_TIMEOUT_MS = 5000;
+    const uint8_t outEp = transport.outEndpoint();
     size_t offset = 0;
     while (offset < data.size()) {
         if (cancelled.load())
@@ -278,14 +359,16 @@ bool FileServer::handleReadFile(IUsbTransport& transport,
         size_t chunkSize = std::min(BULK_CHUNK_SIZE, data.size() - offset);
         auto chunk = std::span<const uint8_t>(data.data() + offset, chunkSize);
 
-        int transferred = transport.bulkWrite(transport.outEndpoint(), chunk, DEFAULT_TIMEOUT_MS);
-        if (transferred < 0) {
+        int transferred = transport.bulkWrite(outEp, chunk, CHUNK_TIMEOUT_MS);
+        if (transferred < 0 || static_cast<size_t>(transferred) != chunkSize) {
             _lastError = "Bulk write failed sending file: " + filename
-                + " at offset " + std::to_string(offset)
-                + " of " + std::to_string(data.size())
-                + " (libusb error " + std::to_string(transferred) + ")";
+                + " (transferred " + std::to_string(offset + std::max(transferred, 0))
+                + " of " + std::to_string(data.size()) + " bytes";
+            if (transferred < 0)
+                _lastError += ", libusb error " + std::to_string(transferred);
+            _lastError += ")";
             qDebug() << "rpiboot:" << _lastError.c_str()
-                     << "ep=0x" << Qt::hex << (int)transport.outEndpoint();
+                     << "ep=0x" << Qt::hex << (int)outEp;
             return false;
         }
         offset += static_cast<size_t>(transferred);
@@ -294,38 +377,130 @@ bool FileServer::handleReadFile(IUsbTransport& transport,
     return true;
 }
 
-void FileServer::parseMetadata(const std::string& filename,
-                                const std::vector<uint8_t>& data)
+namespace {
+
+// ── DUID C40 decode ─────────────────────────────────────────────────────
+// Ported verbatim from usbboot's decode_duid.c so that FACTORY_UUID values
+// are reported in the same human-readable form as upstream rpiboot.
+
+constexpr int DUID_LENGTH = 36;
+
+int charToC40(char val)
 {
-    // Metadata filenames look like "*serial", "*mac", "*otp", "*board-rev"
-    // The "data" returned by the resolver is typically empty for metadata;
-    // the interesting part is in the filename itself (the device encodes
-    // the value as part of the file path).
+    if (val >= 'a' && val <= 'z')
+        val = static_cast<char>(val - 32);
+    if (val >= '0' && val <= '9')
+        return 4 + val - '0';
+    if (val >= 'A' && val <= 'Z')
+        return 14 + val - 'A';
+    return -1;
+}
 
-    // Strip the leading '*'
-    std::string key = filename.substr(1);
+char c40ToChar(int val)
+{
+    if (val >= charToC40('0') && val <= charToC40('9'))
+        return static_cast<char>('0' + val - charToC40('0'));
+    if (val >= charToC40('A') && val <= charToC40('Z'))
+        return static_cast<char>('A' + val - charToC40('A'));
+    return '\0';
+}
 
-    // The value may be appended after a '=' or encoded in the rest of the path
-    std::string value;
-    auto eqPos = key.find('=');
-    if (eqPos != std::string::npos) {
-        value = key.substr(eqPos + 1);
-        key = key.substr(0, eqPos);
-    } else if (!data.empty()) {
-        value.assign(reinterpret_cast<const char*>(data.data()), data.size());
+void decodeHalfWord(int halfWord, int* c40List, int& index)
+{
+    c40List[index] = (halfWord - 1) / 1600;
+    halfWord -= c40List[index++] * 1600;
+    c40List[index] = (halfWord - 1) / 40;
+    halfWord -= c40List[index++] * 40;
+    c40List[index++] = halfWord - 1;
+}
+
+// Decode an underscore-separated list of hex words into the C40 string.
+// Returns false on invalid input (matches upstream's -1 return).
+bool decodeDuidC40(const std::string& wordsIn, std::string& out)
+{
+    int c40List[DUID_LENGTH];
+    int i = 0;
+
+    std::string buf = wordsIn;  // strtok mutates its input
+    for (char* tok = std::strtok(buf.data(), "_"); tok != nullptr;
+         tok = std::strtok(nullptr, "_")) {
+        uint32_t word = static_cast<uint32_t>(std::strtoul(tok, nullptr, 16));
+        if (word == 0)
+            break;
+        // Each half-word emits 3 C40 values; guard the fixed-size buffer.
+        if (i + 3 > DUID_LENGTH)
+            return false;
+        decodeHalfWord(static_cast<int>(word & 0xFFFF), c40List, i);
+
+        uint16_t msig = static_cast<uint16_t>(word >> 16);
+        if (msig > 0) {
+            if (i + 3 > DUID_LENGTH)
+                return false;
+            decodeHalfWord(msig, c40List, i);
+        }
     }
 
-    if (key == "serial" || key == "serialNumber")
+    out.clear();
+    for (int c = 0; c < i; ++c) {
+        char ch = c40ToChar(c40List[c]);
+        if (ch == '\0')
+            return false;
+        out.push_back(ch);
+    }
+    return true;
+}
+
+} // namespace
+
+void FileServer::parseMetadata(const std::string& filename)
+{
+    // The device encodes metadata as "*PROPERTY*VALUE" in the requested
+    // filename — e.g. "*USER_SERIAL_NUM*b91b3ce7", "*EEPROM_UPDATE*success".
+    // Mirror upstream's write_metadata_file(): split on '*' into a property
+    // (first token) and value (second token), and record every pair.
+    if (filename.size() < 2 || filename[0] != '*')
+        return;
+
+    const std::string body = filename.substr(1);  // strip leading '*'
+    const auto sep = body.find('*');
+    std::string property = (sep == std::string::npos) ? body : body.substr(0, sep);
+    std::string value;
+    if (sep != std::string::npos) {
+        // Upstream uses strtok(NULL, "*"), i.e. the token up to the next '*'.
+        const auto end = body.find('*', sep + 1);
+        value = body.substr(sep + 1, end == std::string::npos
+                                         ? std::string::npos
+                                         : end - (sep + 1));
+    }
+
+    if (property.empty())
+        return;
+
+    // FACTORY_UUID is C40-encoded; decode it to match upstream's output.
+    if (property == "FACTORY_UUID" && !value.empty()) {
+        std::string decoded;
+        if (decodeDuidC40(value, decoded))
+            value = std::move(decoded);
+        else
+            qWarning() << "rpiboot: failed to decode FACTORY_UUID metadata:"
+                       << QString::fromStdString(value);
+    }
+
+    _metadata.fields.emplace_back(property, value);
+    qDebug() << "rpiboot metadata:" << QString::fromStdString(property)
+             << "=" << QString::fromStdString(value);
+
+    // Populate typed convenience accessors from the upstream property names.
+    if (property == "USER_SERIAL_NUM")
         _metadata.serialNumber = value;
-    else if (key == "mac" || key == "macAddress")
+    else if (property == "MAC_ADDR")
         _metadata.macAddress = value;
-    else if (key == "otp" || key == "otpState")
-        _metadata.otpState = value;
-    else if (key == "board-rev" || key == "boardRevision") {
+    else if (property == "USER_BOARDREV") {
         try {
-            _metadata.boardRevision = static_cast<uint32_t>(std::stoul(value, nullptr, 16));
+            _metadata.boardRevision =
+                static_cast<uint32_t>(std::stoul(value, nullptr, 16));
         } catch (...) {
-            // Ignore parse errors
+            // Ignore parse errors — keep the raw value in fields regardless.
         }
     }
 }

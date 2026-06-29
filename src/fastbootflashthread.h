@@ -29,6 +29,7 @@ class FastbootFlashThread : public QThread
     Q_OBJECT
 public:
     explicit FastbootFlashThread(const QString& fastbootId,
+                                  const QString& blockDevice,
                                   const QUrl& imageUrl,
                                   quint64 downloadLen,
                                   quint64 extractLen,
@@ -52,6 +53,13 @@ public:
     // When set, unmapped blocks are skipped during fastboot flash.
     void setBmapUrl(const QUrl &url) { _bmapUrl = url; }
 
+    // Configure Raspberry Pi Connect Device Identity registration.
+    // When apiKey is non-empty, the device will be registered with
+    // the Connect management API after flashing and before reboot.
+    // Failures are non-fatal and will not block successful flash.
+    void setConnectRegistration(const QString &apiKey,
+                                 const QString &descriptionPrefix);
+
 signals:
     void writing();   // Emitted when download+flash pipeline starts
     void success();
@@ -72,7 +80,20 @@ private:
     bool applyCustomisation(class fastboot::FastbootProtocol& fb,
                              class rpiboot::IUsbTransport& transport);
 
+    // Best-effort: after the OS image has been flashed, set the
+    // EEPROM's BOOT_ORDER so the chosen storage device boots first on
+    // the next power cycle. Reads the device's existing EEPROM, edits
+    // bootconf.txt in place, re-signs if the device requires it, and
+    // writes back via `oem eeprom-update`. Failures are logged and
+    // swallowed --- a successful image flash should not be reported as
+    // a failure just because the boot-order tweak couldn't run (e.g.
+    // older fastbootd without the eeprom commands, signed-eeprom board
+    // with no key configured, etc.).
+    void applyBootOrderUpdate(class fastboot::FastbootProtocol& fb,
+                               class rpiboot::IUsbTransport& transport);
+
     QString _fastbootId;
+    QString _blockDevice;
     QUrl _imageUrl;
     QUrl _bmapUrl;
     quint64 _downloadLen;
@@ -103,6 +124,10 @@ private:
     QByteArray _cloudinitNetwork;
     QByteArray _cloudinitMetaData;
     QByteArray _initFormat;
+
+    // Raspberry Pi Connect Device Identity registration (optional)
+    QString _connectApiKey;
+    QString _connectDescriptionPrefix;
 };
 
 #endif // FASTBOOTFLASHTHREAD_H

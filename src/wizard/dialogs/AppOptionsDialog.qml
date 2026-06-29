@@ -3,6 +3,8 @@
  * Copyright (C) 2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtCore
 import QtQuick
 import QtQuick.Controls
@@ -15,20 +17,34 @@ import RpiImager
 BaseDialog {
     id: popup
     
-    // Override default height for this more complex dialog
-    height: Math.max(280, contentLayout ? (contentLayout.implicitHeight + Style.cardPadding * 2) : 280)
+    // Cap the dialog height so the options column scrolls when items don't
+    // fit (e.g. on small windows or once Secure Boot key is exposed).
+    height: parent ? Math.min(560, parent.height - Style.cardPadding * 2) : 560
     
-    // imageWriter is inherited from BaseDialog
     // Optional reference to the wizard container for ephemeral flags
     property var wizardContainer: null
-    
+
     property bool initialized: false
     property bool isInitializing: false
+
+    // True while a write is in progress. Used to gate actions that don't make
+    // sense mid-write (e.g. clearing saved customisation). Mirrors the
+    // definition in WizardContainer/WritingStep.
+    readonly property bool isWriting: {
+        var s = ImageWriterSingleton.writeState
+        return s === ImageWriterSingleton.Preparing || s === ImageWriterSingleton.Writing ||
+               s === ImageWriterSingleton.Verifying || s === ImageWriterSingleton.Finalizing ||
+               s === ImageWriterSingleton.Cancelling
+    }
 
     // Custom escape handling
     function escapePressed() {
         popup.close()
     }
+
+    // Keep the Tab focus chain in sync if a write starts/finishes while the
+    // dialog is open — the Clear button enters/leaves the order with it.
+    onIsWritingChanged: requestFocusRebuild()
 
     // Dynamic width that updates when language/text changes
     implicitWidth: Math.max(
@@ -36,6 +52,7 @@ BaseDialog {
         chkEject.naturalWidth,
         chkTelemetry.naturalWidth,
         chkDisableWarnings.naturalWidth,
+        chkConnectOrg.naturalWidth,
         editRepoButton.naturalWidth,
         clearSettingsButton.naturalWidth
     ) + Style.cardPadding * 4  // Double padding: contentLayout + optionsLayout margins
@@ -45,21 +62,24 @@ BaseDialog {
         // Register focus groups
         registerFocusGroup("header", function(){ 
             // Only include header text when screen reader is active (otherwise it's not focusable)
-            if (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) {
+            if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                 return [headerText]
             }
             return []
         }, 0)
-        registerFocusGroup("options", function(){ 
-            var items = [chkBeep.focusItem, chkEject.focusItem, chkTelemetry.focusItem]
-            // Include telemetry help link if visible
-            if (chkTelemetry.helpLinkItem && chkTelemetry.helpLinkItem.visible)
-                items.push(chkTelemetry.helpLinkItem)
-            items.push(chkDisableWarnings.focusItem, editRepoButton.focusItem)
+        registerFocusGroup("options", function(){
+            var items = [chkBeep.focusItem, chkEject.focusItem,
+                         chkDisableWarnings.focusItem, editRepoButton.focusItem]
             // Only include secure boot key button if visible
             if (secureBootKeyButton.visible)
                 items.push(secureBootKeyButton.focusItem)
+            items.push(chkConnectOrg.focusItem)
             items.push(clearSettingsButton.focusItem)
+            // Telemetry pill (and its help link) sit at the bottom — see the
+            // pill's own placement comment below.
+            items.push(chkTelemetry.focusItem)
+            if (chkTelemetry.helpLinkItem && chkTelemetry.helpLinkItem.visible)
+                items.push(chkTelemetry.helpLinkItem)
             return items
         }, 1)
         registerFocusGroup("buttons", function(){ 
@@ -68,7 +88,7 @@ BaseDialog {
     }
 
     // Header
-    Text {
+    FocusableHeading {
         id: headerText
         text: qsTr("App Options")
         font.pointSize: Style.fontSizeLargeHeading
@@ -77,32 +97,34 @@ BaseDialog {
         color: Style.formLabelColor
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
-        Accessible.role: Accessible.Heading
-        Accessible.name: text
-        Accessible.focusable: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
-        focusPolicy: (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-        activeFocusOnTab: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
     }
 
-    // Options section
-    Item {
+    // Options section — scrollable so we don't hide items when the option
+    // list outgrows the dialog (e.g. when Secure Boot RSA Key is shown).
+    ScrollView {
+        id: optionsScroll
         Layout.fillWidth: true
-        Layout.preferredHeight: optionsLayout.implicitHeight + Style.cardPadding
+        Layout.fillHeight: true
+        Layout.margins: Style.cardPadding
+        clip: true
+        contentWidth: availableWidth
+
+        ScrollBar.vertical.policy: ScrollBar.AsNeeded
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
         ColumnLayout {
             id: optionsLayout
-            anchors.fill: parent
-            anchors.margins: Style.cardPadding
+            width: optionsScroll.availableWidth
             spacing: Style.spacingMedium
 
             ImOptionPill {
                 id: chkBeep
                 text: qsTr("Play sound when finished")
-                accessibleDescription: imageWriter.isBeepAvailable() 
+                accessibleDescription: ImageWriterSingleton.isBeepAvailable() 
                     ? qsTr("Play an audio notification when the image write process completes")
                     : qsTr("Audio notification unavailable - no viable audio player found on this system")
                 Layout.fillWidth: true
-                enabled: imageWriter.isBeepAvailable()
+                enabled: ImageWriterSingleton.isBeepAvailable()
                 Component.onCompleted: {
                     focusItem.activeFocusOnTab = true
                 }
@@ -112,18 +134,6 @@ BaseDialog {
                 id: chkEject
                 text: qsTr("Eject media when finished")
                 accessibleDescription: qsTr("Automatically eject the storage device when the write process completes successfully")
-                Layout.fillWidth: true
-                Component.onCompleted: {
-                    focusItem.activeFocusOnTab = true
-                }
-            }
-
-            ImOptionPill {
-                id: chkTelemetry
-                text: qsTr("Enable anonymous statistics (telemetry)")
-                accessibleDescription: qsTr("Send anonymous usage statistics to help improve Raspberry Pi Imager")
-                helpLabel: imageWriter.isEmbeddedMode() ? "" : qsTr("What is this?")
-                helpUrl: imageWriter.isEmbeddedMode() ? "" : "https://github.com/raspberrypi/rpi-imager?tab=readme-ov-file#anonymous-metrics-telemetry"
                 Layout.fillWidth: true
                 Component.onCompleted: {
                     focusItem.activeFocusOnTab = true
@@ -160,10 +170,10 @@ BaseDialog {
                 accessibleDescription: qsTr("Change the source of operating system images between official Raspberry Pi repository and custom sources")
                 Layout.fillWidth: true
                 // Disable while write is in progress to prevent changing source during write
-                enabled: imageWriter.writeState === ImageWriter.Idle ||
-                         imageWriter.writeState === ImageWriter.Succeeded ||
-                         imageWriter.writeState === ImageWriter.Failed ||
-                         imageWriter.writeState === ImageWriter.Cancelled
+                enabled: ImageWriterSingleton.writeState === ImageWriterSingleton.Idle ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Succeeded ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Failed ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Cancelled
                 Component.onCompleted: {
                     focusItem.activeFocusOnTab = true
                 }
@@ -185,21 +195,22 @@ BaseDialog {
                 accessibleDescription: qsTr("Select an RSA 2048-bit private key for signing boot images in secure boot mode")
                 Layout.fillWidth: true
                 // Only show if secure boot is available (via OS capabilities or CLI flag)
-                visible: (wizardContainer && wizardContainer.secureBootAvailable) ||
-                         imageWriter.isSecureBootForcedByCliFlag() ||
-                         imageWriter.checkSWCapability("secure_boot")
+                visible: (popup.wizardContainer && popup.wizardContainer.secureBootAvailable) ||
+                         ImageWriterSingleton.isSecureBootForcedByCliFlag() ||
+                         ImageWriterSingleton.checkSWCapability("secure_boot") ||
+                         ImageWriterSingleton.getDebugForceSecureBoot()
                 // Disable while write is in progress
-                enabled: imageWriter.writeState === ImageWriter.Idle ||
-                         imageWriter.writeState === ImageWriter.Succeeded ||
-                         imageWriter.writeState === ImageWriter.Failed ||
-                         imageWriter.writeState === ImageWriter.Cancelled
+                enabled: ImageWriterSingleton.writeState === ImageWriterSingleton.Idle ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Succeeded ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Failed ||
+                         ImageWriterSingleton.writeState === ImageWriterSingleton.Cancelled
                 Component.onCompleted: {
                     focusItem.activeFocusOnTab = true
                 }
                 onClicked: {
                     // Prefer native file dialog via Imager's wrapper, but only if available
-                    if (imageWriter.nativeFileDialogAvailable()) {
-                        var keyPath = imageWriter.getNativeOpenFileName(
+                    if (ImageWriterSingleton.nativeFileDialogAvailable()) {
+                        var keyPath = ImageWriterSingleton.getNativeOpenFileName(
                             qsTr("Select RSA Private Key"), 
                             "", 
                             qsTr("PEM Files (*.pem);;All Files (*)")
@@ -220,11 +231,29 @@ BaseDialog {
                 }
             }
 
+            ImOptionPill {
+                id: chkConnectOrg
+                text: qsTr("Raspberry Pi Connect for Organisations")
+                accessibleDescription: qsTr("Enable the organisation-level Raspberry Pi Connect registration flow. When active, the Connect wizard step collects an organisation API key and registers each provisioned device with Connect.")
+                helpLabel: ImageWriterSingleton.isEmbeddedMode() ? "" : qsTr("What is this?")
+                helpUrl: ImageWriterSingleton.isEmbeddedMode() ? "" : "https://www.raspberrypi.com/software/connect/"
+                Layout.fillWidth: true
+                Component.onCompleted: {
+                    focusItem.activeFocusOnTab = true
+                }
+            }
+
             ImOptionButton {
                 id: clearSettingsButton
                 text: qsTr("Saved Customisation")
                 btnText: qsTr("Clear")
-                accessibleDescription: qsTr("Remove all saved OS customisation settings such as hostname, WiFi, and user credentials")
+                // Disabled mid-write: clearing only wipes the persisted settings
+                // (the running write already holds its own copy), so allowing it
+                // here is confusing without changing what gets written.
+                enabled: !popup.isWriting
+                accessibleDescription: popup.isWriting
+                    ? qsTr("Clearing saved customisation is unavailable while a write is in progress")
+                    : qsTr("Remove all saved OS customisation settings such as hostname, WiFi, and user credentials")
                 Layout.fillWidth: true
                 Component.onCompleted: {
                     focusItem.activeFocusOnTab = true
@@ -233,24 +262,34 @@ BaseDialog {
                     confirmClearSettings.open()
                 }
             }
-        }
-    }
 
-    // Spacer
-    Item {
-        Layout.fillHeight: true
+            // Telemetry pill is the least impactful option, so it always sits
+            // at the bottom of the list — also keeps it out of the way of more
+            // commonly-toggled options like Beep / Eject / Disable warnings.
+            ImOptionPill {
+                id: chkTelemetry
+                text: qsTr("Enable anonymous statistics (telemetry)")
+                accessibleDescription: qsTr("Send anonymous usage statistics to help improve Raspberry Pi Imager")
+                helpLabel: ImageWriterSingleton.isEmbeddedMode() ? "" : qsTr("What is this?")
+                helpUrl: ImageWriterSingleton.isEmbeddedMode() ? "" : "https://github.com/raspberrypi/rpi-imager?tab=readme-ov-file#anonymous-metrics-telemetry"
+                Layout.fillWidth: true
+                Component.onCompleted: {
+                    focusItem.activeFocusOnTab = true
+                }
+            }
+        }
     }
 
     // Version display - only shown when window has no decorations (no title bar)
     Text {
         id: versionText
-        text: qsTr("Version: %1").arg(imageWriter.constantVersion())
+        text: qsTr("Version: %1").arg(ImageWriterSingleton.constantVersion())
         font.pointSize: Style.fontSizeCaption
         font.family: Style.fontFamily
         color: Style.textDescriptionColor
         Layout.fillWidth: true
         horizontalAlignment: Text.AlignHCenter
-        visible: !imageWriter.hasWindowDecorations()
+        visible: !ImageWriterSingleton.hasWindowDecorations()
         Layout.bottomMargin: Style.spacingSmall
     }
 
@@ -300,14 +339,12 @@ BaseDialog {
     RepositoryDialog {
         id: repoDialog
         parent: popup.parent
-        imageWriter: popup.imageWriter
         wizardContainer: popup.wizardContainer
     }
 
     // File dialog for RSA key selection (embedded mode)
     ImFileDialog {
         id: rsaKeyFileDialog
-        imageWriter: popup.imageWriter
         parent: popup.parent
         anchors.centerIn: parent
         dialogTitle: qsTr("Select RSA Private Key")
@@ -347,35 +384,61 @@ BaseDialog {
 
         // (Re)load current settings from ImageWriter so that Cancel discards changes
         // Only enable beep if it's both saved as enabled AND available on this system
-        chkBeep.checked = imageWriter.getBoolSetting("beep") && imageWriter.isBeepAvailable();
-        chkEject.checked = imageWriter.getBoolSetting("eject");
-        chkTelemetry.checked = imageWriter.getBoolSetting("telemetry");
+        chkBeep.checked = ImageWriterSingleton.getBoolSetting("beep") && ImageWriterSingleton.isBeepAvailable();
+        chkEject.checked = ImageWriterSingleton.getBoolSetting("eject");
+        chkTelemetry.checked = ImageWriterSingleton.getBoolSetting("telemetry");
         // Do not load from QSettings; keep ephemeral
         chkDisableWarnings.checked = popup.wizardContainer ? popup.wizardContainer.disableWarnings : false;
         // Load secure boot RSA key path
-        var keyPath = imageWriter.getStringSetting("secureboot_rsa_key");
+        var keyPath = ImageWriterSingleton.getStringSetting("secureboot_rsa_key");
         if (keyPath) {
             rsaKeyPath.text = keyPath;
         }
+        // Re-bind the Secure Boot RSA Key button's visibility on every open.
+        // The dependencies here are mostly plain Q_INVOKABLE methods (not
+        // Q_PROPERTYs with NOTIFY signals), so the original declarative
+        // binding only evaluates once when the singleton dialog is created
+        // in main.qml — flipping "Force secure boot available" in Debug
+        // Options afterwards wouldn't make the picker appear without a
+        // forced re-bind here.
+        secureBootKeyButton.visible = Qt.binding(function() {
+            return (popup.wizardContainer && popup.wizardContainer.secureBootAvailable) ||
+                   ImageWriterSingleton.isSecureBootForcedByCliFlag() ||
+                   ImageWriterSingleton.checkSWCapability("secure_boot") ||
+                   ImageWriterSingleton.getDebugForceSecureBoot();
+        });
+        // Raspberry Pi Connect for Organisations is a persisted
+        // feature flag.  The API key itself lives in the wizard's
+        // Connect step (session-only) so it is never written to
+        // disk.
+        chkConnectOrg.checked = ImageWriterSingleton.getBoolSetting("connect_org_enabled");
 
         initialized = true;
         // Clear initialization flag
         isInitializing = false;
 
-        // Pre-compute final height before opening to avoid first-show reflow
-        if (firstOpen) {
-            var desired = contentLayout ? (contentLayout.implicitHeight + Style.cardPadding * 2) : 280;
-            popup.height = Math.max(280, desired);
-        }
+        // Pre-compute final height before opening to avoid first-show reflow.
+        // Clamp to the parent window's available height so the dialog never
+        // overflows — the inner ScrollView handles the rest by scrolling.
+        // Re-applied on every open (not just firstOpen) because the content
+        // height changes when feature flags toggle visibility of rows
+        // (e.g. Secure Boot RSA Key, Pi Connect for Organisations).
+        var desired = contentLayout ? (contentLayout.implicitHeight + Style.cardPadding * 2) : 280;
+        var maxHeight = parent ? parent.height - Style.cardPadding * 2 : 560;
+        popup.height = Math.min(Math.max(280, desired), maxHeight);
     }
 
     function applySettings() {
         // Save settings to ImageWriter
         // Only save beep as enabled if it's actually available on this system
-        imageWriter.setSetting("beep", chkBeep.checked && imageWriter.isBeepAvailable());
-        imageWriter.setSetting("eject", chkEject.checked);
-        imageWriter.setSetting("telemetry", chkTelemetry.checked);
-        imageWriter.setSetting("secureboot_rsa_key", rsaKeyPath.text);
+        ImageWriterSingleton.setSetting("beep", chkBeep.checked && ImageWriterSingleton.isBeepAvailable());
+        ImageWriterSingleton.setSetting("eject", chkEject.checked);
+        ImageWriterSingleton.setSetting("telemetry", chkTelemetry.checked);
+        ImageWriterSingleton.setSetting("secureboot_rsa_key", rsaKeyPath.text);
+        // Feature flag only — the stored organisation API key is
+        // kept across toggles.  Use the Clear action on the Connect
+        // wizard step to remove the saved key.
+        ImageWriterSingleton.setSetting("connect_org_enabled", chkConnectOrg.checked);
         // Do not persist disable_warnings; set ephemeral flag only
         if (popup.wizardContainer)
             popup.wizardContainer.disableWarnings = chkDisableWarnings.checked;
@@ -389,7 +452,6 @@ BaseDialog {
     // Confirmation dialog for disabling warnings
     BaseDialog {
         id: confirmDisableWarnings
-        imageWriter: popup.imageWriter
         parent: popup.contentItem
         anchors.centerIn: parent
 
@@ -412,7 +474,7 @@ BaseDialog {
         Component.onCompleted: {
             registerFocusGroup("content", function(){ 
                 // Only include text elements when screen reader is active (otherwise they're not focusable)
-                if (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     return [confirmTitleText, confirmDescriptionText]
                 }
                 return []
@@ -423,7 +485,7 @@ BaseDialog {
         }
 
         // Dialog content
-        Text {
+        FocusableHeading {
             id: confirmTitleText
             text: qsTr("Disable warnings?")
             font.pointSize: Style.fontSizeHeading
@@ -431,14 +493,9 @@ BaseDialog {
             font.bold: true
             color: Style.formLabelColor
             Layout.fillWidth: true
-            Accessible.role: Accessible.Heading
-            Accessible.name: text
-            Accessible.focusable: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
         }
 
-        Text {
+        FocusableText {
             id: confirmDescriptionText
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
@@ -447,11 +504,7 @@ BaseDialog {
             color: Style.textDescriptionColor
             Layout.fillWidth: true
             text: qsTr("If you disable warnings, Raspberry Pi Imager will <b>not show confirmation prompts before writing images</b>. You will still be required to <b>type the exact name</b> when selecting a system drive.")
-            Accessible.role: Accessible.StaticText
             Accessible.name: text.replace(/<[^>]+>/g, '')  // Strip HTML tags for accessibility
-            Accessible.focusable: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
         }
 
         RowLayout {
@@ -487,7 +540,6 @@ BaseDialog {
     // Confirmation dialog for clearing saved customisation settings
     BaseDialog {
         id: confirmClearSettings
-        imageWriter: popup.imageWriter
         parent: popup.contentItem
         anchors.centerIn: parent
 
@@ -500,7 +552,7 @@ BaseDialog {
         Component.onCompleted: {
             registerFocusGroup("content", function(){
                 // Only include text elements when screen reader is active (otherwise they're not focusable)
-                if (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) {
+                if (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) {
                     return [clearSettingsTitleText, clearSettingsDescriptionText]
                 }
                 return []
@@ -511,7 +563,7 @@ BaseDialog {
         }
 
         // Dialog content
-        Text {
+        FocusableHeading {
             id: clearSettingsTitleText
             text: qsTr("Clear saved customisation?")
             font.pointSize: Style.fontSizeHeading
@@ -519,14 +571,9 @@ BaseDialog {
             font.bold: true
             color: Style.formLabelColor
             Layout.fillWidth: true
-            Accessible.role: Accessible.Heading
-            Accessible.name: text
-            Accessible.focusable: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
         }
 
-        Text {
+        FocusableText {
             id: clearSettingsDescriptionText
             textFormat: Text.StyledText
             wrapMode: Text.WordWrap
@@ -535,11 +582,7 @@ BaseDialog {
             color: Style.textDescriptionColor
             Layout.fillWidth: true
             text: qsTr("This will remove all saved OS customisation settings such as hostname, WiFi, and user credentials.")
-            Accessible.role: Accessible.StaticText
             Accessible.name: text.replace(/<[^>]+>/g, '')
-            Accessible.focusable: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
-            focusPolicy: (popup.imageWriter && popup.imageWriter.isScreenReaderActive()) ? Qt.TabFocus : Qt.NoFocus
-            activeFocusOnTab: popup.imageWriter ? popup.imageWriter.isScreenReaderActive() : false
         }
 
         RowLayout {
@@ -563,7 +606,7 @@ BaseDialog {
                 accessibleDescription: qsTr("Remove all saved OS customisation settings permanently")
                 activeFocusOnTab: true
                 onClicked: {
-                    imageWriter.clearSavedCustomisationSettings()
+                    ImageWriterSingleton.clearSavedCustomisationSettings()
                     if (popup.wizardContainer) {
                         popup.wizardContainer.customizationSettings = ({})
                         popup.wizardContainer.hostnameConfigured = false

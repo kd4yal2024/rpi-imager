@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2025 Raspberry Pi Ltd
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -28,7 +30,7 @@ BaseDialog {
 
     Component.onCompleted: {
         registerFocusGroup("warning", function(){
-            return (root.imageWriter && root.imageWriter.isScreenReaderActive()) ? [warningText] : []
+            return (ImageWriterSingleton && ImageWriterSingleton.screenReaderActive) ? [warningText] : []
         }, 0)
         registerFocusGroup("input", function(){
             return [jtagLockCheck, confirmInput]
@@ -47,7 +49,7 @@ BaseDialog {
         Layout.fillWidth: true
         implicitHeight: warningColumn.implicitHeight + Style.spacingMedium * 2
         color: "#FFEBEE"
-        radius: Style.borderRadius
+        radius: Style.cornerRadius(Style.sectionBorderRadius)
 
         ColumnLayout {
             id: warningColumn

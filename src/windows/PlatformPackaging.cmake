@@ -213,6 +213,122 @@ else()
     endif()
 endif()
 
+# ---- MSIX packaging -------------------------------------------------------
+option(ENABLE_MSIX "Build MSIX package for Windows 10/11 sideloading" OFF)
+set(MSIX_PUBLISHER_DN "CN=RaspberryPiImager" CACHE STRING
+    "Certificate subject DN for AppxManifest Publisher — must match the signing cert exactly")
+set(MSIX_SIGN_PFX "" CACHE FILEPATH "PFX certificate to sign the MSIX (leave empty to build unsigned)")
+set(MSIX_SIGN_PFX_PASSWORD "" CACHE STRING "Password for MSIX_SIGN_PFX")
+
+if(ENABLE_MSIX)
+    # Detect target architecture for the MSIX Identity element
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|arm64|aarch64")
+        set(_msix_arch "arm64")
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(_msix_arch "x64")
+    else()
+        set(_msix_arch "x86")
+    endif()
+
+    # Find makeappx.exe from Windows 10 SDK
+    if(NOT MAKEAPPX)
+        set(_w10_kits_regkey "HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows Kits\\Installed Roots")
+        get_filename_component(_w10_kits_path "[${_w10_kits_regkey};KitsRoot10]" ABSOLUTE CACHE)
+        if(_w10_kits_path)
+            file(GLOB _w10_kit_versions "${_w10_kits_path}/bin/10.*")
+            list(REVERSE _w10_kit_versions)
+        endif()
+        unset(_w10_kits_path CACHE)
+        find_program(MAKEAPPX
+            NAMES makeappx makeappx.exe
+            PATHS ${_w10_kit_versions}
+            PATH_SUFFIXES ${_msix_arch} bin/${_msix_arch} bin x64 bin/x64
+            NO_DEFAULT_PATH
+        )
+    endif()
+
+    if(NOT MAKEAPPX)
+        message(WARNING "makeappx.exe not found — install the Windows 10 SDK. Skipping msix_package target.")
+    else()
+        message(STATUS "Found makeappx: ${MAKEAPPX}")
+
+        # Locate signtool if we need it for signing
+        if(MSIX_SIGN_PFX AND NOT SIGNTOOL)
+            find_program(SIGNTOOL
+                NAMES signtool signtool.exe
+                PATHS ${_w10_kit_versions}
+                PATH_SUFFIXES ${_msix_arch} bin/${_msix_arch} bin x64 bin/x64
+                NO_DEFAULT_PATH
+            )
+            if(NOT SIGNTOOL)
+                message(WARNING "MSIX_SIGN_PFX set but signtool.exe not found — MSIX will be unsigned.")
+                set(MSIX_SIGN_PFX "")
+            endif()
+        endif()
+
+        set(_msix_staging  "${CMAKE_BINARY_DIR}/msix-staging")
+        set(_msix_assets   "${CMAKE_CURRENT_SOURCE_DIR}/windows/msix-assets")
+        set(_msix_output   "${CMAKE_BINARY_DIR}/installer/rpi-imager.msix")
+
+        # Write configure-time variables needed by the manifest template
+        set(_msix_extra_vars "${CMAKE_CURRENT_BINARY_DIR}/msix_extra_vars.cmake")
+        file(WRITE "${_msix_extra_vars}"
+            "set(MSIX_PUBLISHER_DN \"${MSIX_PUBLISHER_DN}\")\n"
+            "set(MSIX_ARCH \"${_msix_arch}\")\n"
+        )
+
+        # Configure AppxManifest.xml at build time (version substitution)
+        add_custom_command(
+            OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml"
+            COMMAND ${CMAKE_COMMAND}
+                -DVERSION_VARS_FILE=${IMAGER_VERSION_VARS}
+                -DEXTRA_VARS_FILE=${_msix_extra_vars}
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/windows/AppxManifest.xml.in
+                -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml
+                -P ${CONFIGURE_VERSIONED_SCRIPT}
+            DEPENDS
+                ${IMAGER_VERSION_VARS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/windows/AppxManifest.xml.in
+            COMMENT "Configuring AppxManifest.xml"
+            VERBATIM
+        )
+
+        # Stage files, pack, and optionally sign
+        set(_msix_pack_commands
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${_msix_staging}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${_msix_staging}/Assets"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_BINARY_DIR}/deploy" "${_msix_staging}"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory "${_msix_assets}" "${_msix_staging}/Assets"
+            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml" "${_msix_staging}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/installer"
+            COMMAND "${MAKEAPPX}" pack /d "${_msix_staging}" /p "${_msix_output}" /o
+        )
+
+        if(MSIX_SIGN_PFX AND SIGNTOOL)
+            add_custom_target(msix_package
+                ${_msix_pack_commands}
+                COMMAND "${SIGNTOOL}" sign /fd sha256 /td sha256
+                        /tr http://timestamp.digicert.com
+                        /f "${MSIX_SIGN_PFX}"
+                        /p "${MSIX_SIGN_PFX_PASSWORD}"
+                        "${_msix_output}"
+                DEPENDS ${PROJECT_NAME} "${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml"
+                COMMENT "Building and signing MSIX package"
+                VERBATIM
+            )
+            message(STATUS "Added 'msix_package' target (signed with ${MSIX_SIGN_PFX})")
+        else()
+            add_custom_target(msix_package
+                ${_msix_pack_commands}
+                DEPENDS ${PROJECT_NAME} "${CMAKE_CURRENT_BINARY_DIR}/AppxManifest.xml"
+                COMMENT "Building unsigned MSIX package — run create-msix-cert.ps1 then reconfigure with MSIX_SIGN_PFX"
+                VERBATIM
+            )
+            message(STATUS "Added 'msix_package' target (unsigned — set MSIX_SIGN_PFX to sign)")
+        endif()
+    endif()
+endif()
+
 # Resource file and manifest: generated at build time so version stays
 # in sync with the binary even without a re-configure.
 # Manifest must be generated before the .rc (which embeds it via RT_MANIFEST)

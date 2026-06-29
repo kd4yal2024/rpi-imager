@@ -114,7 +114,7 @@ else
     if [ -d "/opt/Qt" ]; then
         echo "Checking for Qt installations in /opt/Qt..."
         # Find the newest Qt6 version installed
-        NEWEST_QT=$(find /opt/Qt -maxdepth 1 -type d -name "6.*" | sort -V | tail -n 1)
+        NEWEST_QT=$(find -L /opt/Qt -maxdepth 1 -type d -name "6.*" | sort -V | tail -n 1)
         if [ -n "$NEWEST_QT" ]; then
             QT_VERSION=$(basename "$NEWEST_QT")
             
@@ -349,8 +349,14 @@ if [ -n "$LINUXDEPLOY" ] && [ -f "$LINUXDEPLOY" ]; then
         --exclude-library="libgallium*" \
         --exclude-library="libXrender*" \
         --exclude-library="libGL*" \
-        --exclude-library="libEGL*"
-    
+        --exclude-library="libEGL*" \
+        --exclude-library="libsystemd*"
+
+    # Remove libsystemd if it slipped through --exclude-library
+    # It must come from the host system to work with lsblk/libmount/DBus
+    # (see https://github.com/raspberrypi/rpi-imager/issues/1304, #1577)
+    rm -f "$APPDIR/usr/lib/libsystemd"*
+
     # Rename the output file from linuxdeploy's default name to our versioned name
     # linuxdeploy creates: Raspberry_Pi_Imager_(CLI)-${ARCH}.AppImage (based on Name= in desktop file)
     LINUXDEPLOY_OUTPUT="Raspberry_Pi_Imager_(CLI)-${ARCH}.AppImage"

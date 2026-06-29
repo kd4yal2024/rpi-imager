@@ -3,6 +3,8 @@
  * Copyright (C) 2025 Raspberry Pi Ltd
  */
 
+pragma ComponentBehavior: Bound
+
 import QtCore
 import QtQuick
 import QtQuick.Controls
@@ -381,7 +383,7 @@ BaseDialog {
             padding: 8
             background: Rectangle {
                 color: Style.mainBackgroundColor
-                radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.sectionBorderRadiusEmbedded : Style.sectionBorderRadius
+                radius: Style.cornerRadius(Style.sectionBorderRadius)
                 border.color: Style.popupBorderColor
                 border.width: Style.sectionBorderWidth
                 antialiasing: true
@@ -404,7 +406,7 @@ BaseDialog {
                     highlightFollowsCurrentItem: true
                     highlight: Rectangle {
                         color: placesList.activeFocus ? Style.listViewHighlightColor : Qt.rgba(0, 0, 0, 0.05)
-                        radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                        radius: Style.cornerRadius(Style.listItemBorderRadius)
                         antialiasing: true
                         visible: placesList.currentIndex >= 0
                     }
@@ -428,12 +430,12 @@ BaseDialog {
                             color: {
                                 if (ListView.isCurrentItem && placesList.activeFocus)
                                     return Style.listViewHighlightColor
-                                else if (hovered)
+                                else if (leftPane.hovered)
                                     return Style.listViewHoverRowBackgroundColor
                                 else
                                     return "transparent"
                             }
-                            radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                            radius: Style.cornerRadius(Style.listItemBorderRadius)
                             antialiasing: true
                         }
                         onClicked: {
@@ -485,7 +487,7 @@ BaseDialog {
                     highlightFollowsCurrentItem: true
                     highlight: Rectangle {
                         color: subfoldersList.activeFocus ? Style.listViewHighlightColor : Qt.rgba(0, 0, 0, 0.05)
-                        radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                        radius: Style.cornerRadius(Style.listItemBorderRadius)
                         antialiasing: true
                         visible: subfoldersList.currentIndex >= 0
                     }
@@ -518,12 +520,12 @@ BaseDialog {
                             color: {
                                 if (ListView.isCurrentItem && subfoldersList.activeFocus)
                                     return Style.listViewHighlightColor
-                                else if (hovered)
+                                else if (leftPane.hovered)
                                     return Style.listViewHoverRowBackgroundColor
                                 else
                                     return "transparent"
                             }
-                            radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                            radius: Style.cornerRadius(Style.listItemBorderRadius)
                             antialiasing: true
                         }
                         onClicked: {
@@ -563,7 +565,7 @@ BaseDialog {
             padding: 8
             background: Rectangle {
                 color: Style.mainBackgroundColor
-                radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.sectionBorderRadiusEmbedded : Style.sectionBorderRadius
+                radius: Style.cornerRadius(Style.sectionBorderRadius)
                 border.color: Style.popupBorderColor
                 border.width: Style.sectionBorderWidth
                 antialiasing: true
@@ -637,7 +639,7 @@ BaseDialog {
                         // Custom styling to make it look like a navigation item
                         background: Rectangle {
                             color: upEntry.hovered ? Qt.rgba(0, 0, 0, 0.1) : Qt.rgba(0, 0, 0, 0.03)
-                            radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                            radius: Style.cornerRadius(Style.listItemBorderRadius)
                             border.width: upEntry.activeFocus ? 2 : 1
                             border.color: upEntry.activeFocus ? Style.focusOutlineColor : Qt.rgba(0, 0, 0, 0.1)
                             antialiasing: true
@@ -669,7 +671,7 @@ BaseDialog {
                         
                         highlight: Rectangle {
                             color: filesList.activeFocus ? Style.listViewHighlightColor : Qt.rgba(0, 0, 0, 0.05)
-                            radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                            radius: Style.cornerRadius(Style.listItemBorderRadius)
                             antialiasing: true
                             visible: filesList.currentIndex >= 0
                         }
@@ -720,7 +722,7 @@ BaseDialog {
                                     else
                                         return "transparent"
                                 }
-                                radius: (dialog.imageWriter && dialog.imageWriter.isEmbeddedMode()) ? Style.listItemBorderRadiusEmbedded : Style.listItemBorderRadius
+                                radius: Style.cornerRadius(Style.listItemBorderRadius)
                                 antialiasing: true
                             }
                             onClicked: {
@@ -803,6 +805,4 @@ BaseDialog {
         }
     }
 }
-
-
 

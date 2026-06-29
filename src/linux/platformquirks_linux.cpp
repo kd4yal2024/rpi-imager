@@ -38,15 +38,29 @@
 #include <net/if_arp.h>
 #include <QDebug>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QFile>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QDir>
 #include <QFileInfo>
+#include <QSize>
 #include <QCryptographicHash>
+#include <QUrl>
 #include <filesystem>
 #include <QUuid>
 #include <vector>
 #include <string>
+
+#ifdef QT_DBUS_LIB
+// xdg-desktop-portal OpenURI is only used by builds that link Qt DBus (the GUI
+// app). QT_DBUS_LIB is defined automatically by Qt when the DBus module is
+// linked, so the CLI build and the DBus-free PAL unit test exclude this cleanly.
+#include <QVariant>
+#include <QMap>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#endif
 
 namespace {
     // Network monitoring state
@@ -1095,52 +1109,254 @@ bool launchDetached(const QString& program, const QStringList& arguments) {
     //
     // Note: We do NOT call setsid() because that would create a new session
     // and break D-Bus/display connections needed for GUI applications.
-    
-    pid_t pid = fork();
-    
-    if (pid < 0) {
-        qWarning() << "launchDetached: fork failed:" << strerror(errno);
+    //
+    // A close-on-exec status pipe lets the parent learn whether the
+    // grandchild's execv() actually succeeded. The parent waits on the first
+    // child, which exits the moment it has forked the grandchild — long before
+    // exec runs — so without this pipe a missing or unrunnable program would
+    // still look like success, and callers (e.g. ImageWriter::openUrl) would
+    // never reach their fallback paths. On a successful exec the write end is
+    // closed automatically (FD_CLOEXEC) and the parent's read returns EOF; on
+    // failure the grandchild writes errno before exiting.
+
+    int statusPipe[2];
+    if (pipe(statusPipe) != 0) {
+        qWarning() << "launchDetached: pipe failed:" << strerror(errno);
         return false;
     }
-    
+    fcntl(statusPipe[0], F_SETFD, FD_CLOEXEC);
+    fcntl(statusPipe[1], F_SETFD, FD_CLOEXEC);
+
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        qWarning() << "launchDetached: fork failed:" << strerror(errno);
+        close(statusPipe[0]);
+        close(statusPipe[1]);
+        return false;
+    }
+
     if (pid == 0) {
-        // First child - fork again to fully detach
+        // First child - only the grandchild writes to the pipe, so drop the
+        // read end here, then fork again to fully detach.
+        close(statusPipe[0]);
+
         pid_t pid2 = fork();
-        
+
         if (pid2 < 0) {
             _exit(1);
         }
-        
+
         if (pid2 > 0) {
-            // First child exits, orphaning the grandchild (adopted by init)
+            // First child exits, orphaning the grandchild (adopted by init).
+            // Its copy of the write end closes here; only the grandchild's copy
+            // remains, so the parent's read reflects the grandchild's fate.
             _exit(0);
         }
-        
+
         // Grandchild - build argv and exec
-        
+
         // Clear AppImage environment before running external tools
         clearAppImageEnvironment();
-        
+
         QByteArray programBytes = program.toUtf8();
         std::vector<QByteArray> argBytes;
         std::vector<char*> argv;
-        
+
         argv.push_back(programBytes.data());
         for (const QString& arg : arguments) {
             argBytes.push_back(arg.toUtf8());
             argv.push_back(argBytes.back().data());
         }
         argv.push_back(nullptr);
-        
-        execvp(programBytes.constData(), argv.data());
+
+        // Resolve to absolute path to prevent PATH hijack under elevated privileges.
+        QByteArray resolvedProgram = programBytes;
+        if (!programBytes.startsWith('/')) {
+            static const char *searchDirs[] = {"/usr/bin/", "/bin/", "/usr/sbin/", "/sbin/", nullptr};
+            for (const char **dir = searchDirs; *dir; ++dir) {
+                QByteArray candidate = QByteArray(*dir) + programBytes;
+                if (access(candidate.constData(), X_OK) == 0) {
+                    resolvedProgram = candidate;
+                    break;
+                }
+            }
+        }
+        execv(resolvedProgram.constData(), argv.data());
+
+        // exec failed - report errno to the parent so the status pipe carries a
+        // payload instead of closing cleanly (which would read as success).
+        const int execErrno = errno;
+        ssize_t w;
+        do {
+            w = write(statusPipe[1], &execErrno, sizeof(execErrno));
+        } while (w < 0 && errno == EINTR);
         _exit(127);  // exec failed
     }
-    
-    // Parent - wait for first child to exit
+
+    // Parent - close the write end so the grandchild is the only writer, then
+    // wait for the first child (which exits as soon as it has forked).
+    close(statusPipe[1]);
+
     int status;
-    waitpid(pid, &status, 0);
-    
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    const bool firstChildOk = (waited == pid) && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+
+    // Read the exec result: EOF (n == 0) means execv() succeeded and closed the
+    // write end via FD_CLOEXEC; a payload means it failed and wrote errno.
+    bool execOk = false;
+    if (firstChildOk) {
+        int execErrno = 0;
+        ssize_t n;
+        do {
+            n = read(statusPipe[0], &execErrno, sizeof(execErrno));
+        } while (n < 0 && errno == EINTR);
+
+        if (n == 0) {
+            execOk = true;  // EOF: exec succeeded
+        } else if (n > 0) {
+            qWarning() << "launchDetached: exec of" << program
+                       << "failed:" << strerror(execErrno);
+        } else {
+            qWarning() << "launchDetached: status pipe read failed:" << strerror(errno);
+        }
+    }
+
+    close(statusPipe[0]);
+    return execOk;
+}
+
+#ifdef QT_DBUS_LIB
+// Open an http(s) URL via the xdg-desktop-portal OpenURI interface. Routes
+// through the desktop environment's own URL handler, which is more robust than
+// xdg-open's MIME lookups and is the only path that works from inside a
+// Flatpak/Snap-confined browser environment. Returns true if the portal
+// accepted the request.
+static bool openUriViaPortal(const QString& uri) {
+    QDBusConnection bus = QDBusConnection::sessionBus();
+    if (!bus.isConnected()) {
+        return false;
+    }
+
+    QDBusMessage msg = QDBusMessage::createMethodCall(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QStringLiteral("/org/freedesktop/portal/desktop"),
+        QStringLiteral("org.freedesktop.portal.OpenURI"),
+        QStringLiteral("OpenURI"));
+    // OpenURI(parent_window: s, uri: s, options: a{sv}) -> handle: o
+    msg << QString() << uri << QVariantMap();
+
+    // Bounded timeout: if the portal is present but unresponsive, fall back to
+    // xdg-open rather than blocking the GUI thread for the default 25s.
+    QDBusMessage reply = bus.call(msg, QDBus::Block, 2000);
+    if (reply.type() == QDBusMessage::ErrorMessage) {
+        qWarning() << "OpenURI portal unavailable:" << reply.errorMessage();
+        return false;
+    }
+    qDebug() << "Opened URL via xdg-desktop-portal:" << uri;
+    return true;
+}
+#endif // QT_DBUS_LIB
+
+// Run xdg-open as the original (non-root) user when the GUI is itself elevated,
+// so it can reach that user's desktop session. Returns true if a launcher
+// process started.
+static bool openUrlAsOriginalUser(const QString& url) {
+    uid_t targetUid = 0;
+    QString targetUsername;
+
+    // Recover the invoking user from the elevation wrapper's environment.
+    const char* pkexecUid = ::getenv("PKEXEC_UID");
+    const char* sudoUid = ::getenv("SUDO_UID");
+    if (pkexecUid) {
+        targetUid = static_cast<uid_t>(::atoi(pkexecUid));
+    } else if (sudoUid) {
+        targetUid = static_cast<uid_t>(::atoi(sudoUid));
+    } else if (::getuid() != ::geteuid()) {
+        targetUid = ::getuid();
+    }
+
+    if (targetUid != 0) {
+        struct passwd* pw = ::getpwuid(targetUid);
+        if (pw && pw->pw_name) {
+            targetUsername = QString::fromUtf8(pw->pw_name);
+        }
+    }
+
+    if (targetUsername.isEmpty()) {
+        qWarning() << "Could not determine original user for xdg-open";
+        return false;
+    }
+
+    // Carry the env vars xdg-open needs to reach the user's desktop session.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString dbusSessionAddress = env.value(QStringLiteral("DBUS_SESSION_BUS_ADDRESS"));
+    const QString xdgRuntimeDir = env.value(QStringLiteral("XDG_RUNTIME_DIR"));
+    const QString display = env.value(QStringLiteral("DISPLAY"));
+    const QString waylandDisplay = env.value(QStringLiteral("WAYLAND_DISPLAY"));
+    const QString xauthority = env.value(QStringLiteral("XAUTHORITY"));
+
+    // runuser -u <user> -- env VAR=value ... xdg-open <url>
+    // runuser preserves more than `pkexec --user` and needs no auth when root.
+    QStringList envArgs;
+    envArgs << QStringLiteral("env");
+    if (!dbusSessionAddress.isEmpty())
+        envArgs << QStringLiteral("DBUS_SESSION_BUS_ADDRESS=%1").arg(dbusSessionAddress);
+    if (!xdgRuntimeDir.isEmpty())
+        envArgs << QStringLiteral("XDG_RUNTIME_DIR=%1").arg(xdgRuntimeDir);
+    if (!display.isEmpty())
+        envArgs << QStringLiteral("DISPLAY=%1").arg(display);
+    if (!waylandDisplay.isEmpty())
+        envArgs << QStringLiteral("WAYLAND_DISPLAY=%1").arg(waylandDisplay);
+    if (!xauthority.isEmpty())
+        envArgs << QStringLiteral("XAUTHORITY=%1").arg(xauthority);
+    envArgs << QStringLiteral("xdg-open") << url;
+
+    QStringList runuserArgs;
+    runuserArgs << QStringLiteral("-u") << targetUsername << QStringLiteral("--") << envArgs;
+
+    if (launchDetached(QStringLiteral("runuser"), runuserArgs)) {
+        qDebug() << "Started runuser xdg-open";
+        return true;
+    }
+
+    qWarning() << "Failed to start runuser xdg-open, falling back to pkexec";
+    QStringList pkexecArgs;
+    pkexecArgs << QStringLiteral("--user") << targetUsername
+               << QStringLiteral("xdg-open") << url;
+    if (launchDetached(QStringLiteral("pkexec"), pkexecArgs)) {
+        qDebug() << "Started pkexec xdg-open";
+        return true;
+    }
+
+    qWarning() << "Failed to start pkexec xdg-open process";
+    return false;
+}
+
+bool openUrlExternally(const QUrl& url) {
+    const QString urlStr = url.toString();
+
+    // When elevated, xdg-open must run as the original user to reach their
+    // desktop session; the portal isn't reachable on root's session bus.
+    if (::geteuid() == 0) {
+        return openUrlAsOriginalUser(urlStr);
+    }
+
+    // Prefer the desktop portal, then fall back to xdg-open.
+#ifdef QT_DBUS_LIB
+    if (openUriViaPortal(urlStr)) {
+        return true;
+    }
+#endif
+    if (launchDetached(QStringLiteral("xdg-open"), QStringList() << urlStr)) {
+        qDebug() << "Started xdg-open";
+        return true;
+    }
+    qWarning() << "Failed to start xdg-open process";
+    return false;
 }
 
 bool tryElevate(int argc, char** argv) {
@@ -1252,7 +1468,7 @@ void execElevated(const QStringList& extraArgs) {
     
     fflush(stdout);
     fflush(stderr);
-    execvp("pkexec", argv.data());
+    execv("/usr/bin/pkexec", argv.data());
     
     // Only reached if exec failed
     qWarning() << "Failed to exec pkexec:" << strerror(errno);
@@ -1262,6 +1478,74 @@ bool isScrollInverted(bool qtInvertedFlag) {
     // On Linux, Qt's inverted flag behavior varies by desktop environment.
     // Most modern DEs (GNOME, KDE) correctly report it, so we pass through.
     return qtInvertedFlag;
+}
+
+bool prefersReducedMotion() {
+    // Use absolute paths for external commands — this function may run in an
+    // elevated (root) context after pkexec.  Relative names would search PATH,
+    // which could be user-controlled.
+
+    // GNOME: org.gnome.desktop.interface enable-animations
+    // This is the standard accessibility setting on GNOME-based desktops.
+    {
+        const QString bin = QStringLiteral("/usr/bin/gsettings");
+        if (QFileInfo::exists(bin)) {
+            QProcess gsettings;
+            gsettings.start(bin, {"get", "org.gnome.desktop.interface", "enable-animations"});
+            if (gsettings.waitForFinished(500)) {
+                QString value = gsettings.readAllStandardOutput().trimmed();
+                if (value == "false") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // KDE Plasma 5.67+: AnimationDurationFactor=0 disables animations
+    // Prefer kreadconfig6 (Plasma 6), fallback to kreadconfig5 (Plasma 5).
+    {
+        QString bin = QStringLiteral("/usr/bin/kreadconfig6");
+        if(!QFileInfo::exists(bin)) {
+            bin = QStringLiteral("/usr/bin/kreadconfig5");
+        }
+        if (QFileInfo::exists(bin)) {
+            QProcess kreadconfig;
+            kreadconfig.start(bin, {"--group", "KDE", "--key", "AnimationDurationFactor"});
+            if (kreadconfig.waitForFinished(500)) {
+                QString value = kreadconfig.readAllStandardOutput().trimmed();
+                bool ok = false;
+                double factor = value.toDouble(&ok);
+                if (ok && factor == 0.0) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Fallback: GTK3 settings file — works on Raspberry Pi OS, XFCE, MATE,
+    // LXDE, LXQt, and any other GTK-based desktop without GSettings.
+    // Users can set gtk-enable-animations=0 in ~/.config/gtk-3.0/settings.ini
+    {
+        QString gtkSettingsPath = QDir::homePath() + "/.config/gtk-3.0/settings.ini";
+        QFile gtkSettings(gtkSettingsPath);
+        if (gtkSettings.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!gtkSettings.atEnd()) {
+                QString line = gtkSettings.readLine().trimmed();
+                if (line.startsWith("gtk-enable-animations")) {
+                    int eq = line.indexOf('=');
+                    if (eq >= 0) {
+                        QString value = line.mid(eq + 1).trimmed();
+                        if (value == "0" || value == "false") {
+                            return true;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 QString getWriteDevicePath(const QString& devicePath) {
@@ -1413,6 +1697,14 @@ DiskResult ejectDisk(const QString& device) {
     return unmountDisk(device);
 }
 
+DiskResult refreshDiskView(const QString& device) {
+    // The kernel re-reads the partition table when the exclusive device handle
+    // is closed (BLKRRPART is also available, but unnecessary in the normal
+    // flow), and udev handles drive-name reassignment without our help.
+    Q_UNUSED(device);
+    return DiskResult::Success;
+}
+
 const char* findCACertBundle()
 {
     // Cache the result - this is called on every curl handle setup
@@ -1469,10 +1761,91 @@ void clearAppImageEnvironment() {
     unsetenv("LD_PRELOAD");
 }
 
+bool registerUriScheme() {
+    // $APPIMAGE (set by the AppImage runtime) or the resolved /proc/self/exe.
+    // %u makes the OS pass the rpi-imager:// callback URL as an argument.
+    const char* bundle = getBundlePath();
+    if (!bundle || bundle[0] == '\0') {
+        qWarning() << "registerUriScheme: could not resolve executable path";
+        return false;
+    }
+    const QString execPath = QString::fromUtf8(bundle);
+
+    // NoDisplay keeps this out of the application menu — it exists purely as a
+    // scheme handler, not a second launcher entry alongside the packaged one.
+    const QString desktopContents = QStringLiteral(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Raspberry Pi Imager\n"
+        "Exec=%1 %u\n"
+        "Icon=rpi-imager\n"
+        "Terminal=false\n"
+        "NoDisplay=true\n"
+        "MimeType=x-scheme-handler/rpi-imager;\n").arg(execPath);
+    const QByteArray desktopBytes = desktopContents.toUtf8();
+
+    const QString appsDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
+                            + QStringLiteral("/applications");
+    const QString desktopName = QStringLiteral("com.raspberrypi.rpi-imager-uri-handler.desktop");
+    const QString desktopPath = appsDir + QLatin1Char('/') + desktopName;
+
+    // Idempotent: if the entry already matches, assume registration is current
+    // and skip the desktop-database tools so steady-state startup stays cheap.
+    {
+        QFile existing(desktopPath);
+        if (existing.open(QIODevice::ReadOnly) && existing.readAll() == desktopBytes) {
+            return true;
+        }
+    }
+
+    if (!QDir().mkpath(appsDir)) {
+        qWarning() << "registerUriScheme: cannot create" << appsDir;
+        return false;
+    }
+
+    // Atomic write so a crash mid-write can't leave a truncated handler entry.
+    QSaveFile file(desktopPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qWarning() << "registerUriScheme: cannot write" << desktopPath
+                   << file.errorString();
+        return false;
+    }
+    file.write(desktopBytes);
+    if (!file.commit()) {
+        qWarning() << "registerUriScheme: commit failed for" << desktopPath;
+        return false;
+    }
+
+    // Refresh the desktop database and set ourselves as the default handler.
+    // Best-effort with bounded waits: a missing tool just means we rely on the
+    // MimeType association. Clear the AppImage library overrides for the child
+    // so these system tools load their own libraries (see clearAppImageEnvironment).
+    auto runTool = [](const QString& prog, const QStringList& args) {
+        QProcess p;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.remove(QStringLiteral("LD_LIBRARY_PATH"));
+        env.remove(QStringLiteral("LD_PRELOAD"));
+        p.setProcessEnvironment(env);
+        p.start(prog, args);
+        if (!p.waitForStarted(2000)) {
+            return;  // tool not present on this system
+        }
+        p.waitForFinished(3000);
+    };
+    runTool(QStringLiteral("update-desktop-database"), QStringList() << appsDir);
+    runTool(QStringLiteral("xdg-mime"),
+            QStringList() << QStringLiteral("default") << desktopName
+                          << QStringLiteral("x-scheme-handler/rpi-imager"));
+
+    qDebug() << "Registered rpi-imager:// scheme handler at" << desktopPath;
+    return true;
+}
+
 qreal detectTextScaleFactor()
 {
-    // If QT_SCALE_FACTOR is already set (embedded mode), don't add text scaling
-    // on top — the whole UI is already scaled uniformly by the launcher script.
+    // If QT_SCALE_FACTOR is already set (embedded mode sets it from the display
+    // DPI/resolution in applyEmbeddedDisplayScaling), don't add text scaling on
+    // top — the whole UI is already scaled uniformly by Qt.
     if (!qgetenv("QT_SCALE_FACTOR").isEmpty()) {
         return 1.0;
     }
@@ -1537,6 +1910,170 @@ qreal detectTextScaleFactor()
 qreal fontDpiCorrection()
 {
     return 72.0 / 96.0;
+}
+
+namespace {
+
+// Connected display, as read from /sys/class/drm. Physical dimensions are
+// optional (0 = unknown) because many panels report no usable size.
+struct DrmDisplay {
+    int widthPx = 0;
+    int heightPx = 0;
+    int widthMm = 0;
+    int heightMm = 0;
+    bool valid() const { return widthPx > 0 && heightPx > 0; }
+};
+
+// A computed DPI outside this window is treated as bogus physical-size data,
+// triggering the resolution-based fallback. Spans large low-DPI TVs through
+// dense phone-class panels.
+constexpr qreal kMinPlausibleDpi = 40.0;
+constexpr qreal kMaxPlausibleDpi = 600.0;
+
+// Derive the physical image size (mm) from a raw EDID block. Prefers the
+// per-millimetre size in the first detailed timing descriptor; falls back to
+// the coarse centimetre-granularity bytes in the basic display parameters.
+// Returns {0, 0} when neither is usable.
+QSize physicalSizeFromEdid(const QByteArray &edid)
+{
+    if (edid.size() < 128)
+        return {};
+    const auto *b = reinterpret_cast<const unsigned char *>(edid.constData());
+
+    // Validate the fixed EDID header before trusting any offsets.
+    static const unsigned char kHeader[8] = {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+    if (std::memcmp(b, kHeader, sizeof(kHeader)) != 0)
+        return {};
+
+    // First detailed timing descriptor lives at offset 54. It carries the
+    // image size in mm, but only when it is an actual timing descriptor
+    // (non-zero pixel clock) rather than a monitor descriptor.
+    constexpr int kDtd = 54;
+    if (b[kDtd] != 0 || b[kDtd + 1] != 0) {
+        const int hMm = b[kDtd + 12] | ((b[kDtd + 14] & 0xF0) << 4);
+        const int vMm = b[kDtd + 13] | ((b[kDtd + 14] & 0x0F) << 8);
+        if (hMm > 0 && vMm > 0)
+            return QSize(hMm, vMm);
+    }
+
+    // Basic display parameters: max image size in cm (bytes 0x15 / 0x16).
+    const int hCm = b[21];
+    const int vCm = b[22];
+    if (hCm > 0 && vCm > 0)
+        return QSize(hCm * 10, vCm * 10);
+
+    return {};
+}
+
+// Find the first connected DRM connector that advertises a usable mode, and
+// read its native resolution plus best-effort physical size.
+DrmDisplay readConnectedDisplay()
+{
+    DrmDisplay info;
+    const QDir drmDir(QStringLiteral("/sys/class/drm"));
+    const QStringList connectors = drmDir.entryList(
+        QStringList() << QStringLiteral("card*-*"),
+        QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+
+    for (const QString &connector : connectors) {
+        const QString base = drmDir.absoluteFilePath(connector);
+
+        // Skip outputs that aren't connected.
+        QFile statusFile(base + QStringLiteral("/status"));
+        if (!statusFile.open(QIODevice::ReadOnly))
+            continue;
+        if (statusFile.readAll().trimmed() != QByteArray("connected"))
+            continue;
+
+        // Native resolution = first (preferred) line of the modes file.
+        int w = 0, h = 0;
+        QFile modesFile(base + QStringLiteral("/modes"));
+        if (modesFile.open(QIODevice::ReadOnly)) {
+            const QByteArray firstMode = modesFile.readLine().trimmed();
+            const int xPos = firstMode.indexOf('x');
+            if (xPos > 0) {
+                w = firstMode.left(xPos).toInt();
+                h = firstMode.mid(xPos + 1).toInt();
+            }
+        }
+        if (w <= 0 || h <= 0)
+            continue;  // connected but advertises no usable mode
+
+        info.widthPx = w;
+        info.heightPx = h;
+
+        // Physical size from EDID (frequently absent on DSI panels).
+        QFile edidFile(base + QStringLiteral("/edid"));
+        if (edidFile.open(QIODevice::ReadOnly)) {
+            const QSize mm = physicalSizeFromEdid(edidFile.readAll());
+            info.widthMm = mm.width();
+            info.heightMm = mm.height();
+        }
+
+        qInfo() << "Embedded scaling: connector" << connector
+                << QStringLiteral("%1x%2 px").arg(w).arg(h)
+                << (info.widthMm > 0
+                        ? QStringLiteral("%1x%2 mm").arg(info.widthMm).arg(info.heightMm)
+                        : QStringLiteral("(no physical size)"));
+        break;
+    }
+    return info;
+}
+
+} // namespace
+
+void applyEmbeddedDisplayScaling()
+{
+    // A manually-set QT_SCALE_FACTOR (environment override, testing, or a site
+    // policy) always wins — never clobber it.
+    if (!qgetenv("QT_SCALE_FACTOR").isEmpty()) {
+        qInfo() << "Embedded scaling: QT_SCALE_FACTOR already set to"
+                << qgetenv("QT_SCALE_FACTOR") << "- leaving untouched";
+        return;
+    }
+
+    const DrmDisplay display = readConnectedDisplay();
+    if (!display.valid()) {
+        qWarning() << "Embedded scaling: no connected display found via DRM;"
+                   << "leaving QT_SCALE_FACTOR unset (Qt defaults to 1.0)";
+        return;
+    }
+
+    qreal scale = 1.0;
+    const char *basis = nullptr;
+
+    // Primary path: derive the factor from DPI when the physical size is
+    // present and yields a plausible density.
+    if (display.widthMm > 0) {
+        const qreal dpi = display.widthPx * 25.4 / display.widthMm;
+        if (dpi >= kMinPlausibleDpi && dpi <= kMaxPlausibleDpi) {
+            if      (dpi >= 216) scale = 2.5;
+            else if (dpi >= 168) scale = 2.0;
+            else if (dpi >= 132) scale = 1.5;
+            else if (dpi >= 108) scale = 1.25;
+            else                 scale = 1.0;
+            basis = "DPI";
+            qInfo().nospace() << "Embedded scaling: " << qRound(dpi) << " DPI -> scale " << scale;
+        } else {
+            qWarning().nospace() << "Embedded scaling: implausible " << qRound(dpi)
+                                 << " DPI from physical size; using resolution fallback";
+        }
+    }
+
+    // Fallback: choose a fixed factor from the pixel resolution when we can't
+    // trust (or don't have) a physical size. Key off the longer edge so
+    // portrait panels are treated the same as landscape.
+    if (!basis) {
+        const int longEdge = qMax(display.widthPx, display.heightPx);
+        if      (longEdge >= 3840) scale = 2.0;   // 4K / UHD
+        else if (longEdge >= 2560) scale = 1.5;   // QHD / 1440p
+        else                       scale = 1.0;   // 1080p and below
+        basis = "resolution";
+        qInfo().nospace() << "Embedded scaling: " << longEdge << "px long edge -> scale " << scale;
+    }
+
+    qputenv("QT_SCALE_FACTOR", QByteArray::number(scale));
+    qInfo().nospace() << "Embedded scaling: QT_SCALE_FACTOR=" << scale << " (from " << basis << ")";
 }
 
 } // namespace PlatformQuirks

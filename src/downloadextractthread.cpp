@@ -80,7 +80,28 @@ DownloadExtractThread::DownloadExtractThread(const QByteArray &url, const QByteA
     // Get optimal buffer slot sizes (hints based on total system memory)
     size_t inputBufferSizeHint = SystemMemoryManager::instance().getOptimalInputBufferSize();
     size_t writeBufferSizeHint = _writeBufferSize;  // Already set from getOptimalWriteBufferSize()
-    
+
+    // Cap write buffer to the device's maximum single-request I/O size.
+    // This prevents the OS from splitting each write into many sub-requests,
+    // which amplifies queue pressure on devices with low queue depth. See #1592.
+    {
+        auto limits = rpi_imager::FileOperations::QueryDeviceIOLimits(_filename.toStdString());
+        if (limits.max_transfer_bytes > 0 && limits.max_transfer_bytes < writeBufferSizeHint)
+        {
+            size_t deviceMaxBytes = limits.max_transfer_bytes;
+            // Align down to page boundary for O_DIRECT / FILE_FLAG_NO_BUFFERING compatibility
+            deviceMaxBytes = (deviceMaxBytes / pageSize) * pageSize;
+            if (deviceMaxBytes >= pageSize)
+            {
+                qDebug() << "Capping write buffer from" << writeBufferSizeHint
+                         << "to" << deviceMaxBytes << "bytes"
+                         << "(device max transfer:" << limits.max_transfer_bytes << ")";
+                writeBufferSizeHint = deviceMaxBytes;
+                _writeBufferSize = deviceMaxBytes;
+            }
+        }
+    }
+
     // Use COORDINATED ring buffer allocation to prevent memory exhaustion
     // This ensures both ring buffers together fit within 30% of available memory.
     // Buffer sizes may be scaled down on low-memory systems while maintaining
@@ -102,7 +123,7 @@ DownloadExtractThread::DownloadExtractThread(const QByteArray &url, const QByteA
     _ringBuffer = std::make_unique<RingBuffer>(inputSlots, actualInputSize, pageSize);
     
     // Create ring buffer for decompress -> write path (decompressed data)
-    _writeRingBuffer = std::make_unique<RingBuffer>(writeSlots, actualWriteSize, pageSize);
+    _writeRingBuffer = std::make_shared<RingBuffer>(writeSlots, actualWriteSize, pageSize);
     
     qDebug() << "Using buffer size:" << _writeBufferSize << "bytes with page size:" << pageSize << "bytes";
     qDebug() << "Input ring buffer:" << inputSlots << "slots of" << actualInputSize << "bytes";
@@ -130,6 +151,42 @@ DownloadExtractThread::~DownloadExtractThread()
     // Ring buffer destructors handle memory cleanup
     _writeRingBuffer.reset();
     _ringBuffer.reset();
+}
+
+void DownloadExtractThread::_onDevicePrepared()
+{
+    // If the user asked to ignore device limits and the write buffer was capped
+    // below the RAM-based optimum, reallocate the ring buffers at full size.
+    // This runs after _openAndPrepareDevice() but before any ring buffer access.
+    if (!_debugIgnoreDeviceLimits)
+        return;
+
+    size_t optimalWriteSize = SystemMemoryManager::instance().getOptimalWriteBufferSize();
+    if (_writeBufferSize >= optimalWriteSize)
+        return;  // wasn't capped — nothing to do
+
+    qDebug() << "Ignoring device I/O limits: reallocating ring buffers"
+             << "(write buffer" << _writeBufferSize << "->" << optimalWriteSize << ")";
+
+    size_t pageSize = SystemMemoryManager::instance().getSystemPageSize();
+    size_t inputBufferSizeHint = SystemMemoryManager::instance().getOptimalInputBufferSize();
+    size_t writeBufferSizeHint = optimalWriteSize;
+
+    size_t inputSlots, writeSlots;
+    size_t actualInputSize, actualWriteSize;
+    size_t totalMemory = SystemMemoryManager::instance().getCoordinatedRingBufferConfig(
+        inputBufferSizeHint, writeBufferSizeHint,
+        inputSlots, writeSlots,
+        actualInputSize, actualWriteSize);
+
+    _writeBufferSize = actualWriteSize;
+    _ringBuffer = std::make_unique<RingBuffer>(inputSlots, actualInputSize, pageSize);
+    _writeRingBuffer = std::make_shared<RingBuffer>(writeSlots, actualWriteSize, pageSize);
+
+    qDebug() << "Reallocated ring buffers:"
+             << "input" << inputSlots << "x" << actualInputSize
+             << "write" << writeSlots << "x" << actualWriteSize
+             << "total" << (totalMemory / (1024 * 1024)) << "MB";
 }
 
 void DownloadExtractThread::_emitProgressUpdate()
@@ -253,7 +310,16 @@ void DownloadExtractThread::_onDownloadSuccess()
     
     // Wait for extraction thread to finish processing all data
     _extractThread->wait();
-    
+
+    // The download half succeeded, but the extraction thread may have aborted
+    // while draining the ring buffer (or the write was cancelled). Emitting
+    // success() unconditionally here would override an already-reported error
+    // and bounce the UI to the "write complete" screen. (#1603)
+    if (_extractFailed || _cancelled) {
+        qDebug() << "Extraction did not complete successfully; suppressing success signal";
+        return;
+    }
+
     // Extraction thread already called _writeComplete(), so just emit success to signal thread completion
     emit success();
 }
@@ -404,14 +470,17 @@ void DownloadExtractThread::extractImageRun()
             // Emit progress updates during extraction
             _emitProgressUpdate();
 
-            // Create a completion callback that releases the ring buffer slot
+            // Create a completion callback that releases the ring buffer slot.
             // This enables ZERO-COPY async I/O: the slot stays valid until the
             // async write truly completes, then is returned to the pool.
-            // Capture slot and buffer pointers by value for the callback.
-            RingBuffer* ringBuf = _writeRingBuffer.get();
+            // Capture a shared_ptr copy to extend the ring buffer's lifetime
+            // until all outstanding async callbacks have completed, preventing
+            // use-after-free if the owning thread resets _writeRingBuffer
+            // while callbacks are still pending.
+            std::shared_ptr<RingBuffer> ringBufRef = _writeRingBuffer;
             RingBuffer::Slot* slotToRelease = slot;
-            DownloadThread::WriteCompleteCallback releaseCallback = [ringBuf, slotToRelease]() {
-                ringBuf->releaseReadSlot(slotToRelease);
+            DownloadThread::WriteCompleteCallback releaseCallback = [ringBufRef, slotToRelease]() {
+                ringBufRef->releaseReadSlot(slotToRelease);
             };
             
             // IMPORTANT: Call _writeFile directly from extraction thread instead of via
@@ -448,6 +517,7 @@ void DownloadExtractThread::extractImageRun()
         if (!_cancelled)
         {
             // Fatal error
+            _extractFailed = true;
             DownloadThread::cancelDownload();
             
             // Use stall error message if set (from ring buffer stall), otherwise use exception message
@@ -694,6 +764,7 @@ void DownloadExtractThread::extractMultiFileRun()
         if (!_cancelled)
         {
             /* Fatal error */
+            _extractFailed = true;
             DownloadThread::cancelDownload();
             
             // Use stall error message if set (from ring buffer stall), otherwise use exception message

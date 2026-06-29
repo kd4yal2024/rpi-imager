@@ -245,7 +245,7 @@ if(BUILD_CLI_ONLY)
     # CLI builds need imagewriter but not the GUI components
     set(SOURCES ${SOURCES_BASE} "imagewriter.cpp" "hwlistmodel.cpp" "oslistmodel.cpp")
 else()
-    set(SOURCES ${SOURCES_BASE} "networkaccessmanagerfactory.cpp" "qml.qrc" "nativefiledialog.cpp" "iconimageprovider.cpp" "iconmultifetcher.cpp")
+    set(SOURCES ${SOURCES_BASE} "qml.qrc" "nativefiledialog.cpp" "iconimageprovider.cpp" "iconmultifetcher.cpp")
 endif()
 
 if(BUILD_EMBEDDED)
@@ -265,11 +265,15 @@ set(SOURCES ${SOURCES}
     "rpiboot/firmware_manager.cpp"
     "rpiboot/rpiboot_scanner.cpp"
     "rpiboot/secure_boot_provisioner.cpp"
+    "rpiboot/bootloader_image.cpp"
     "rpibootthread.cpp"
     "fastboot/fastboot_protocol.cpp"
     "fastboot/bmap.cpp"
     "fastboot/sparse_encoder.cpp"
+    "fastboot/pieeprom.cpp"
+    "fastboot/eeprom_signer.cpp"
     "fastbootflashthread.cpp"
+    "connect_device_registrar.cpp"
 )
 
 # Find Qt components - different requirements for CLI-only vs GUI builds
@@ -288,7 +292,7 @@ endif()
 if (Qt6_FOUND)
     set(QT Qt6)
     if (APPLE)
-        set(CMAKE_OSX_DEPLOYMENT_TARGET "12" CACHE STRING "" FORCE)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "13" CACHE STRING "" FORCE)
     endif()
 else()
     message(FATAL_ERROR "Missing suitable Qt library (must be at least version 6.9)" )
@@ -364,23 +368,6 @@ if(GENERATE_COUNTRIES_FROM_REGDB)
     list(APPEND SOURCES "${GENERATED_COUNTRIES_QRC}")
 endif()
 
-option(GENERATE_CAPITAL_CITIES "Generate capital cities list from REST Countries API" ON)
-
-if(GENERATE_CAPITAL_CITIES)
-    set(REST_COUNTRIES_URL "https://restcountries.com/v3.1/all?fields=name,capital,cca2,timezones")
-
-    # The generator script handles fallback internally - it downloads from API
-    # and falls back to the source file if the download fails (offline builds)
-    add_generated_resource_with_fallback(GENERATED_CAPITAL_CITIES_QRC GENERATE_CAPITAL_CITIES_TGT capital-cities
-        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateCapitalCities.cmake
-        capital-cities_generated.txt capital-cities.txt
-        ${CMAKE_CURRENT_SOURCE_DIR}/capital-cities.txt
-        EXTRA_CMAKE_ARGS 
-            -DAPI_URL=${REST_COUNTRIES_URL}
-            -DKEYMAP_FILE=${CMAKE_CURRENT_SOURCE_DIR}/keymap-layouts.txt
-    )
-    list(APPEND SOURCES "${GENERATED_CAPITAL_CITIES_QRC}")
-endif()
 # Create the application target before tools reference it
 if (WIN32)
     # Adding WIN32 prevents a console window being opened on Windows
@@ -423,12 +410,6 @@ if(GENERATE_COUNTRIES_FROM_REGDB AND DEFINED GENERATE_COUNTRIES_TGT)
     add_dependencies(${PROJECT_NAME} ${GENERATE_COUNTRIES_TGT})
     # Make sure autogen (rcc) also waits on countries generation
     set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY AUTOGEN_TARGET_DEPENDS ${GENERATE_COUNTRIES_TGT})
-endif()
-
-# Ensure capital cities list is generated before building resources
-if(GENERATE_CAPITAL_CITIES AND DEFINED GENERATE_CAPITAL_CITIES_TGT)
-    add_dependencies(${PROJECT_NAME} ${GENERATE_CAPITAL_CITIES_TGT})
-    set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY AUTOGEN_TARGET_DEPENDS ${GENERATE_CAPITAL_CITIES_TGT})
 endif()
 
 # Note: Icon Composer compilation for macOS dark mode icons is handled in
@@ -478,11 +459,11 @@ if(NOT BUILD_CLI_ONLY)
         qmlcomponents/ImButton.qml
         qmlcomponents/ImButtonRed.qml
         qmlcomponents/ImCheckBox.qml
-        qmlcomponents/ImCloseButton.qml
         qmlcomponents/ImComboBox.qml
+        qmlcomponents/FocusableText.qml
+        qmlcomponents/FocusableHeading.qml
         qmlcomponents/ImFileDialog.qml
         qmlcomponents/ImSaveFileDialog.qml
-        qmlcomponents/ImPopup.qml
         qmlcomponents/ImRadioButton.qml
         qmlcomponents/ImOptionPill.qml
         qmlcomponents/ImOptionButton.qml
@@ -530,16 +511,19 @@ endif()
 
 # Only create QML module for GUI builds
 if(NOT BUILD_CLI_ONLY)
+    # CACHEGEN is left enabled (the default): qmlcachegen compiles our QML to
+    # bytecode at build time and embeds it in the binary, so the engine skips
+    # the per-launch lex/parse/compile step. This uses the FOSS qmlcachegen
+    # (the C++-emitting qmlsc is not required and is not shipped with the
+    # open-source Qt we build against).
     qt_add_qml_module(${PROJECT_NAME}
         URI RpiImager
         VERSION 1.0
         QML_FILES ${IMAGER_QML_FILES}
         SOURCES ${IMAGER_QML_CPP_TYPES}
-        NO_CACHEGEN
         OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/RpiImager
         DEPENDENCIES QtQuick
         NO_PLUGIN
-        QML_FILES
     )
 endif()
 

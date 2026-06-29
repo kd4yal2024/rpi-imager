@@ -8,6 +8,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QUrl>
 #include <functional>
 
 namespace PlatformQuirks {
@@ -78,6 +79,40 @@ namespace PlatformQuirks {
     /** Launch a detached process that will outlive the parent. */
     bool launchDetached(const QString& program, const QStringList& arguments);
 
+    /**
+     * Open a URL using the platform's native mechanism.
+     *
+     * Encapsulates all platform-specific URL launching so callers stay
+     * platform-agnostic:
+     *   - Linux: the xdg-desktop-portal OpenURI interface, falling back to
+     *     xdg-open (run as the original user when elevated).
+     *   - macOS: the `open` command.
+     *   - Windows: returns false by design, so the caller uses Qt's opener
+     *     rather than routing the URL through a shell (metacharacter safety).
+     *
+     * Returns true if the URL was handed off successfully. A false return
+     * means the caller should fall back to QDesktopServices::openUrl().
+     */
+    bool openUrlExternally(const QUrl& url);
+
+    /**
+     * Register this application as the handler for the rpi-imager:// URL
+     * scheme, so the Raspberry Pi Connect sign-in flow can hand the auth token
+     * back by redirecting the browser to an rpi-imager:// URL.
+     *
+     * Platform mechanics differ, but all live behind this one call:
+     *   - Linux: writes a user-level .desktop entry pointing at this
+     *     executable and registers it as the default x-scheme-handler/rpi-imager
+     *     handler (packaged installs ship a system one; AppImages and other
+     *     unpackaged runs need this at runtime).
+     *   - macOS: LSSetDefaultHandlerForURLScheme against this app's bundle.
+     *   - Windows: no-op — the installer writes the registry association.
+     *
+     * Idempotent and best-effort. Returns true if registration succeeded, was
+     * already in place, or is not required on this platform.
+     */
+    bool registerUriScheme();
+
     /** Run the policy installer with elevated privileges (interactive). */
     bool runElevatedPolicyInstaller();
 
@@ -86,6 +121,18 @@ namespace PlatformQuirks {
 
     /** Determine if scroll direction should be inverted for natural scrolling. */
     bool isScrollInverted(bool qtInvertedFlag);
+
+    /**
+     * Check if the user's OS accessibility settings prefer reduced motion.
+     *
+     * Returns true when the platform signals that animations should be
+     * minimised or disabled — e.g. "Show animations" off on Windows,
+     * "Reduce motion" on macOS, or "enable-animations false" on GNOME.
+     *
+     * The result is read once (at call time) and not cached, so callers
+     * that need a live value should re-query when appropriate.
+     */
+    bool prefersReducedMotion();
 
     /**
      * Detect the platform's preferred text scaling factor.
@@ -141,6 +188,25 @@ namespace PlatformQuirks {
      */
     DiskResult ejectDisk(const QString& device);
 
+    /**
+     * Ask the OS to re-read partition information from a disk and refresh its
+     * view of mounted volumes / drive letters. Intended for use after a write
+     * error or other abrupt end to a raw-write operation, where the on-disk
+     * partition table no longer matches what the OS last enumerated.
+     *
+     * On Windows this issues IOCTL_DISK_UPDATE_PROPERTIES so a wiped or
+     * partially-written disk regains its drive letter and Explorer stops
+     * showing it as missing.
+     *
+     * On Linux and macOS the kernel re-reads the partition table when the
+     * exclusive device handle is closed, so this is a no-op that returns
+     * Success.
+     *
+     * @param device The device path
+     * @return DiskResult::Success on success, error code otherwise
+     */
+    DiskResult refreshDiskView(const QString& device);
+
 #ifdef Q_OS_LINUX
     /**
      * Find the system's CA certificate bundle for libcurl.
@@ -164,6 +230,25 @@ namespace PlatformQuirks {
      * Call this in forked child processes before execvp().
      */
     void clearAppImageEnvironment();
+
+    /**
+     * Determine an appropriate UI scale factor for an embedded display and set
+     * QT_SCALE_FACTOR accordingly. MUST be called BEFORE QGuiApplication is
+     * constructed (Qt reads QT_SCALE_FACTOR during platform initialisation).
+     *
+     * Embedded builds run under the linuxfb/eglfs QPA platform with no window
+     * manager or compositor to negotiate DPI, so the scale has to be derived
+     * here from the connected display, read directly from /sys/class/drm:
+     *   - If the panel reports a plausible physical size, the factor is chosen
+     *     from the display's DPI.
+     *   - If the physical size is missing or implausible (common on cheap HDMI
+     *     panels and DSI displays that report 0 cm or nonsense EDID), the
+     *     factor falls back to a fixed value keyed off the pixel resolution.
+     *
+     * An already-set QT_SCALE_FACTOR (manual override) is always respected and
+     * left untouched. A no-op if no connected display can be read.
+     */
+    void applyEmbeddedDisplayScaling();
 #endif
 }
 
